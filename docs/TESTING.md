@@ -1,4 +1,4 @@
-# Testing - LumaCapture 1.0.1
+# Testing - LumaCapture 1.0.0
 
 These are the results on the development PC: i5-2400S (4C/4T, AVX, no AVX2),
 12 GB RAM, GeForce GT 730 (Fermi), Windows 10 22H2, 1920×1080 @ 60 Hz, and a
@@ -17,7 +17,7 @@ powershell -File scripts\test.ps1 -Gui         # + scripted GUI self-test (recor
 Output goes to `build\test-output` and never to the recording folder. The
 script stops a run if the CPU falls below 60 % of its base clock.
 
-## Automated results (final 1.0.1 build)
+## Automated results (release build)
 
 | Test | Result | Notes |
 |---|---|---|
@@ -35,7 +35,7 @@ script stops a run if the CPU falls below 60 % of its base clock.
 | hw recording_lifecycle_short | PASS | 720p30 + system + mic + webcam, pause; start 138 ms, stop 200 ms, 0 dropped; video 5.03 s = audio 5.03 s |
 | hw mp4_conversion | PASS | 5.03 s |
 | hw crash_recovery | PASS | process killed while recording; recovered file decodes (62 frames) |
-| hw webcam_start_stop_cycles | PASS | 6 cycles, each stop 474-523 ms (1.0.0: stop could hang indefinitely) |
+| hw webcam_start_stop_cycles | PASS | 6 cycles, each stop 474-523 ms (the earlier internal build could hang here indefinitely) |
 | GUI self-test | PASS | see below |
 
 GUI self-test sequence:
@@ -77,9 +77,9 @@ Measured on the C270 in the test room:
     exposure;
   - a live pacing readout that explains the effect.
 
-Older measurements: the 1.0.0 synchronous reader delivered about 24 fps from
-the same camera and the 1.0.1 asynchronous reader about 30 fps. The preview was
-15 fps before and now runs at the camera rate.
+Older measurements: the earlier internal build's synchronous reader delivered
+about 24 fps from the same camera; this release's asynchronous reader delivers
+about 30 fps. The preview was 15 fps before and now runs at the camera rate.
 
 ## Not tested (or only partly)
 
@@ -87,7 +87,7 @@ Automated tests do not cover these, and they were not tested manually during
 this release. Use the checklist in `docs/USER-GUIDE.txt`.
 
 - Window capture and region capture through the GUI. The capture code is
-  unchanged from 1.0.0.
+  unchanged since the earlier internal build.
 - Global hotkeys pressed while another application has focus.
 - Microphone processing chains (gate, compressor, EQ, noise suppression) by ear.
 - Audio device unplug/replug and default-device changes while recording.

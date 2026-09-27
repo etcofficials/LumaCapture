@@ -1,6 +1,8 @@
 # Changelog
 
-## 1.0.1 - stabilisation release
+## 1.0.0 - first public release (2026-09-27)
+
+The changes below are relative to the unreleased internal build that preceded it.
 
 ### Fixed
 
@@ -68,7 +70,5 @@
 - The packaging script verifies DLL dependencies and a standalone launch from a
   path with spaces, and preserves the user's `LumaCapture-data`.
 - Test suite: `luma-tests` (unit + hardware) and a scripted GUI self-test.
-
-## 1.0.0
-
-First complete application.
+- The default recordings folder is Windows **Videos\LumaCapture** (it was a
+  fixed drive path).

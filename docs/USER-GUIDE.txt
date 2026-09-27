@@ -1,4 +1,4 @@
-LumaCapture 1.0.1 - user guide and manual test checklist
+LumaCapture 1.0.0 - user guide and manual test checklist
 =========================================================
 
 STARTING
@@ -8,8 +8,8 @@ STARTING
   adds a desktop shortcut after asking you first.
 
   Settings, history, logs and crash dumps are kept in the "LumaCapture-data"
-  folder next to the exe. Recordings go to G:\video (change this with
-  "Change..." or in Settings > General).
+  folder next to the exe. Recordings go to your Windows Videos\LumaCapture
+  folder (change this with "Change..." or in Settings > General).
 
 BASIC WORKFLOW
   1. Source: Display / Window / Region.

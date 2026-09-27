@@ -1,7 +1,9 @@
 #include "AppSettings.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QSettings>
+#include <QStandardPaths>
 
 namespace luma::app {
 namespace {
@@ -73,7 +75,10 @@ AppSettings loadSettings(const QString& iniPath)
 {
     AppSettings s;
     QSettings q(iniPath, QSettings::IniFormat);
-    const QString videoRoot = QStringLiteral("G:/video");
+    // Default for a fresh install: the user's Videos folder (saved settings keep any chosen folder).
+    QString videoRoot = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    videoRoot = videoRoot.isEmpty() ? QCoreApplication::applicationDirPath() + QStringLiteral("/Recordings")
+                                    : videoRoot + QStringLiteral("/LumaCapture");
 
     q.beginGroup("general");
     s.outputDir = q.value("outputDir", videoRoot).toString();

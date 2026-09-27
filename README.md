@@ -4,7 +4,8 @@ A lightweight, recording-focused screen recorder for older Windows PCs.
 Built and tuned on an Intel Core i5-2400S with a GeForce GT 730 (Fermi, no NVENC)
 running Windows 10 22H2. No streaming, no scenes, no accounts, no network access.
 
-**Version 1.0.1** - see [CHANGELOG.md](CHANGELOG.md).
+**Version 1.0.0** - see [CHANGELOG.md](CHANGELOG.md).
+**Download:** [Releases](https://github.com/etcofficials/LumaCapture/releases) (portable ZIP, Windows 10/11 x64).
 
 ## Features
 
@@ -50,7 +51,7 @@ The portable build lives in `dist\LumaCapture\`. Double-click
 `Create-Desktop-Shortcut.bat` optionally adds a desktop shortcut after asking.
 
 Settings, history, logs and crash dumps: `LumaCapture-data\` next to the exe.
-Recordings: `G:\video` by default (change it in the app).
+Recordings: your Windows **Videos\LumaCapture** folder by default (change it in the app).
 
 ## Build
 
