@@ -1,0 +1,27 @@
+#pragma once
+
+#include <QString>
+#include <QWidget>
+
+#include <cstdint>
+
+namespace luma::app {
+
+// Hides (or shows) a top-level window from screen capture (Desktop
+// Duplication, Windows.Graphics.Capture, BitBlt) via WDA_EXCLUDEFROMCAPTURE
+// (Windows 10 2004+). The window stays visible on the monitor.
+void setExcludedFromCapture(QWidget* window, bool excluded);
+
+// Free bytes on the volume holding `path` (walks up to an existing folder); -1 if unknown.
+int64_t freeDiskBytes(const QString& path);
+
+// Replaces characters Windows does not allow in file names.
+QString sanitizeFileName(QString name);
+
+QString formatBytes(uint64_t bytes);
+QString formatDuration(double seconds);
+
+// Opens Explorer with the file selected.
+void showInExplorer(const QString& file);
+
+} // namespace luma::app

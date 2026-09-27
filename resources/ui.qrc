@@ -1,0 +1,7 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/ui">
+        <file alias="chevron-down.svg">ui/chevron-down.svg</file>
+        <file alias="chevron-up.svg">ui/chevron-up.svg</file>
+    </qresource>
+</RCC>

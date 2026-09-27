@@ -1,0 +1,35 @@
+LumaCapture - third-party components and licenses
+===================================================
+
+LumaCapture itself is distributed under the GNU General Public License,
+version 3 (GPL-3.0), because it is linked with a GPL-3.0 build of FFmpeg that
+contains libx264. See GPL-3.0.txt (the LICENSE file in the source repository).
+LumaCapture source code: see the project repository / the source archive this
+build was made from (version 1.0.1).
+
+FFmpeg 7.1.5 (BtbN "win64-gpl-shared-7.1" build, n7.1.5-12-g1fdbca85aa)
+  Files: avcodec-61.dll, avformat-61.dll, avutil-59.dll, avfilter-10.dll,
+         swscale-8.dll, swresample-5.dll, postproc-58.dll
+  Configured with --enable-gpl --enable-version3 (license: GPL-3.0).
+  Source: https://ffmpeg.org/ and https://github.com/BtbN/FFmpeg-Builds
+  Contains statically linked third-party libraries (for example x264 and
+  others listed by "ffmpeg -buildconf"); they are covered by the GPL-3.0 of the
+  combined build.
+
+x264 (inside avcodec-61.dll)
+  License: GNU GPL version 2 or later. https://www.videolan.org/developers/x264.html
+
+Qt 6.8.3 (Qt6Core, Qt6Gui, Qt6Widgets, Qt6Svg, platform/style/image plugins)
+  License: GNU LGPL version 3 (LGPL-3.0.txt, which supplements GPL-3.0.txt).
+  Qt is dynamically linked; you may replace the Qt DLLs with compatible builds.
+  Source: https://download.qt.io/ (qtbase, qtsvg 6.8.3)
+
+Microsoft Visual C++ Redistributable (msvcp140*.dll, vcruntime140*.dll)
+  Redistributed under the Microsoft Visual Studio license terms for
+  redistributable code.
+
+Windows components used through their SDK APIs (not redistributed):
+  DXGI Desktop Duplication, Windows.Graphics.Capture, Direct3D 11, WASAPI,
+  Media Foundation, DWM, GDI.
+
+LumaCapture contains no telemetry and makes no network connections.

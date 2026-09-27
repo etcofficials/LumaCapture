@@ -1,0 +1,18 @@
+# Build output and portable package (reproducible with scripts\build.ps1 / package.ps1)
+build/
+dist/
+out/
+.vs/
+CMakeUserPresets.json
+
+# Recordings, screenshots, runtime data (settings, history, logs, crash dumps)
+*.mkv
+*.mp4
+*.lumarec
+LumaCapture-data/
+*.dmp
+*.log
+
+# Tooling
+__pycache__/
+*.pyc
