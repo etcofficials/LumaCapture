@@ -58,6 +58,11 @@ private:
 //  * tick periods missed because this thread was late -> droppedLateTicks;
 //    the grid skips ahead instead of bursting to catch up.
 // An unchanged picture repeats the previous frame buffer without any GPU work.
+//
+// Live preview: when SessionConfig::preview is set, a small BGRA copy of the composed
+// frame is rendered at most every previewIntervalMs and read back one tick later
+// (never waiting on the GPU). In previewOnly mode nothing is encoded: the loop only
+// composes changed pictures and feeds the preview.
 class CaptureLoop {
 public:
     CaptureLoop(const SessionConfig& config, encode::FramePool& pool, BoundedQueue<FrameTicket>& queue,
@@ -106,6 +111,9 @@ private:
     void drainAll();
     void copyToFrame(int slot, const gpu::ReadbackRing::Mapped& mapped);
     void enqueue(int slot, int64_t pts, int64_t tickQpc, bool unique);
+    gpu::FrameInputs frameInputs();
+    void servicePreview();
+    void resetPreview();
     void handleDeviceLost(const std::exception& e);
     void setStatus(const std::string& s);
 
@@ -136,6 +144,13 @@ private:
 
     std::array<Pending, kMaxPending> m_pending{};
     unsigned m_pendingHead = 0, m_pendingCount = 0;
+
+    // Live preview: one small staging copy, mapped without waiting on a later tick.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_previewStaging;
+    unsigned m_previewW = 0, m_previewH = 0;
+    bool m_previewPending = false; // a copy is in flight in m_previewStaging
+    bool m_previewDirty = false;   // a newer composite exists than the last preview
+    int64_t m_lastPreviewQpc = 0;
 
     int m_lastSlot = -1;     // frame holding the most recent picture (held with one reference)
     bool m_dirty = true;     // picture changed since the last submitted frame

@@ -4,6 +4,7 @@
 //   PS_Y         Y  plane, R8_UNORM   at output size
 //   PS_UV        UV plane, R8G8_UNORM at half output size (R = Cb, G = Cr)
 //   PS_Composite BGRA at output size, for the --cpu-convert path
+//   PS_Preview   small BGRA live-preview image, sampled from the finished NV12 planes
 // Colour: BT.709 limited range, matching the encoder tags.
 
 cbuffer Params : register(b0)
@@ -47,10 +48,23 @@ VSOut VSMain(uint id : SV_VertexID)
 
 float3 src(float2 uv) { return sourceTex.SampleLevel(linearClamp, uv, 0).rgb; }
 
+// Base sample of the source at an output pixel. When downscaling, one bilinear tap
+// only sees 2x2 source pixels and aliases fine text (shimmering, broken strokes);
+// four taps spread over the output pixel's footprint approximate an area filter.
+float3 srcScaled(float2 uv)
+{
+    [branch] if (srcScale > 1.25) {
+        float2 d = (0.25 * srcScale) / srcSize;
+        return 0.25 * (src(uv + float2(-d.x, -d.y)) + src(uv + float2(d.x, -d.y)) +
+                       src(uv + float2(-d.x, d.y)) + src(uv + d));
+    }
+    return src(uv);
+}
+
 float3 sampleSource(float2 srcPx)
 {
     float2 uv = srcPx / srcSize;
-    float3 c = src(uv);
+    float3 c = srcScaled(uv);
     [branch] if (blurRadius > 0) {
         float2 d = blurRadius / srcSize;
         c += src(uv + float2(d.x, 0)) + src(uv - float2(d.x, 0)) + src(uv + float2(0, d.y)) + src(uv - float2(0, d.y));
@@ -160,4 +174,32 @@ float2 PS_UV(VSOut i) : SV_Target
 float4 PS_Composite(VSOut i) : SV_Target
 {
     return float4(compose(i.pos.xy), 1.0);
+}
+
+// ---------------------------------------------------------------- live preview
+// Reads the NV12 planes that were just rendered (exactly what is encoded) and
+// converts them back to RGB at preview size.
+cbuffer PreviewParams : register(b1)
+{
+    float2 previewSize; float2 previewPad;
+};
+Texture2D<float>  yPlane  : register(t5);
+Texture2D<float2> uvPlane : register(t6);
+
+float4 PS_Preview(VSOut i) : SV_Target
+{
+    float2 uv = i.pos.xy / previewSize;
+    // Downscale with four taps over the preview pixel's footprint (one preview pixel
+    // spans 1/previewSize in texture coordinates; see srcScaled).
+    float2 d = 0.25 / previewSize;
+    float y = 0.25 * (yPlane.SampleLevel(linearClamp, uv + float2(-d.x, -d.y), 0) +
+                      yPlane.SampleLevel(linearClamp, uv + float2(d.x, -d.y), 0) +
+                      yPlane.SampleLevel(linearClamp, uv + float2(-d.x, d.y), 0) +
+                      yPlane.SampleLevel(linearClamp, uv + d, 0));
+    float2 c = uvPlane.SampleLevel(linearClamp, uv, 0) - (128.0 / 255.0);
+    y = (y - 16.0 / 255.0) * (255.0 / 219.0);
+    c *= 255.0 / 224.0;
+    // BT.709 limited-range Y'CbCr -> R'G'B' (inverse of kY/kCb/kCr above).
+    float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
+    return float4(saturate(rgb), 1.0);
 }

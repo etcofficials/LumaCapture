@@ -2,6 +2,7 @@
 
 #include "TestMain.h"
 
+#include "capture/Screenshot.h"
 #include "mux/Muxer.h"
 #include "session/RecordingSession.h"
 #include "webcam/WebcamCapture.h"
@@ -9,6 +10,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <optional>
@@ -363,6 +365,254 @@ TEST("hw", crash_recovery)
     const int frames = std::atoi(decode.text.c_str());
     luma::test::note(std::format("recovered file decodes: {} video frames", frames));
     CHECK(frames > 30);
+}
+
+namespace {
+
+// Runs an FFmpeg tool from the G: install and returns its stdout (binary-safe).
+std::string runFfmpeg(const std::wstring& args)
+{
+    std::string out;
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE rd = nullptr, wr = nullptr;
+    CreatePipe(&rd, &wr, &sa, 0);
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr;
+    si.hStdError = nul;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"G:\\DevTools\\ffmpeg\\bin\\ffmpeg.exe\" -v error " + args;
+    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(wr);
+        char buf[65536];
+        DWORD n = 0;
+        while (ReadFile(rd, buf, sizeof(buf), &n, nullptr) && n > 0)
+            out.append(buf, n);
+        WaitForSingleObject(pi.hProcess, 30000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    } else {
+        CloseHandle(wr);
+    }
+    CloseHandle(nul);
+    CloseHandle(rd);
+    return out;
+}
+
+struct Rgb {
+    int r = 0, g = 0, b = 0;
+};
+
+// Mean colour of a w x h patch at (x, y) of frame `n` of a video file.
+Rgb samplePatch(const std::filesystem::path& file, int n, int x, int y, int w, int h)
+{
+    const std::string raw = runFfmpeg(std::format(L"-i \"{}\" -vf \"select=eq(n\\,{}),crop={}:{}:{}:{}\" -frames:v 1 "
+                                                  L"-f rawvideo -pix_fmt rgb24 -",
+                                                  file.wstring(), n, w, h, x, y));
+    Rgb m;
+    const size_t px = raw.size() / 3;
+    if (px == 0)
+        return {-1, -1, -1};
+    long long r = 0, g = 0, b = 0;
+    for (size_t i = 0; i < px; ++i) {
+        r += static_cast<unsigned char>(raw[i * 3]);
+        g += static_cast<unsigned char>(raw[i * 3 + 1]);
+        b += static_cast<unsigned char>(raw[i * 3 + 2]);
+    }
+    return {static_cast<int>(r / px), static_cast<int>(g / px), static_cast<int>(b / px)};
+}
+
+int colourDistance(Rgb a, COLORREF c)
+{
+    return std::abs(a.r - GetRValue(c)) + std::abs(a.g - GetGValue(c)) + std::abs(a.b - GetBValue(c));
+}
+
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
+// A solid-colour top-most test window of one of the kinds Qt/Win32 apps create.
+struct ProbeWindow {
+    enum class Kind { Normal, LayeredAlpha, LayeredPerPixel };
+    const char* label;
+    Kind kind;
+    COLORREF colour;
+    bool exclude;
+    bool excludeBeforeShow;
+    RECT rect{};
+    HWND hwnd = nullptr;
+    BOOL affinityOk = FALSE;
+    DWORD affinityError = 0;
+    DWORD affinityRead = 0;
+};
+
+LRESULT CALLBACK probeProc(HWND h, UINT msg, WPARAM w, LPARAM l)
+{
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        HBRUSH br = CreateSolidBrush(static_cast<COLORREF>(GetWindowLongPtrW(h, GWLP_USERDATA)));
+        FillRect(dc, &ps.rcPaint, br);
+        DeleteObject(br);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    return DefWindowProcW(h, msg, w, l);
+}
+
+// Per-pixel alpha content via UpdateLayeredWindow (how Qt draws WA_TranslucentBackground windows).
+void paintPerPixel(HWND h, const RECT& r, COLORREF c, BYTE alpha)
+{
+    const int w = r.right - r.left, ht = r.bottom - r.top;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -ht;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    auto* px = static_cast<uint32_t*>(bits);
+    const uint32_t pr = GetRValue(c) * alpha / 255, pg = GetGValue(c) * alpha / 255, pb = GetBValue(c) * alpha / 255;
+    for (int i = 0; i < w * ht; ++i)
+        px[i] = (static_cast<uint32_t>(alpha) << 24) | (pr << 16) | (pg << 8) | pb; // premultiplied BGRA
+    HGDIOBJ old = SelectObject(mem, bmp);
+    POINT dst{r.left, r.top}, src{0, 0};
+    SIZE size{w, ht};
+    BLENDFUNCTION bf{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UpdateLayeredWindow(h, screen, &dst, &size, mem, &src, 0, &bf, ULW_ALPHA);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+}
+
+void applyAffinity(ProbeWindow& p)
+{
+    p.affinityOk = SetWindowDisplayAffinity(p.hwnd, WDA_EXCLUDEFROMCAPTURE);
+    p.affinityError = p.affinityOk ? 0 : GetLastError();
+    GetWindowDisplayAffinity(p.hwnd, &p.affinityRead);
+}
+
+} // namespace
+
+// Which kinds of windows does WDA_EXCLUDEFROMCAPTURE really keep out of a
+// LumaCapture display recording (DXGI Desktop Duplication -> encoder -> MKV), and
+// out of a GDI screenshot? Shows one test window of each kind, records 2.5 s,
+// decodes a frame and checks whether each window's colour is in the file.
+TEST("hw", capture_exclusion_in_recorded_file)
+{
+    SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    std::vector<ProbeWindow> probes = {
+        {"normal window, excluded after show", ProbeWindow::Kind::Normal, RGB(255, 0, 255), true, false},
+        {"layered (alpha) window, excluded after show", ProbeWindow::Kind::LayeredAlpha, RGB(0, 255, 255), true, false},
+        {"per-pixel layered (Qt translucent), excluded after show", ProbeWindow::Kind::LayeredPerPixel, RGB(255, 255, 0), true, false},
+        {"per-pixel layered (Qt translucent), excluded before show", ProbeWindow::Kind::LayeredPerPixel, RGB(40, 80, 255), true, true},
+        {"control: normal window, NOT excluded", ProbeWindow::Kind::Normal, RGB(255, 128, 0), false, false},
+    };
+    for (size_t i = 0; i < probes.size(); ++i)
+        probes[i].rect = RECT{100 + static_cast<LONG>(i) * 350, 260, 400 + static_cast<LONG>(i) * 350, 460};
+
+    // The windows live on their own thread with a message loop (painting, DWM updates).
+    std::atomic<bool> ready{false}, quit{false};
+    std::thread ui([&] {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = probeProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"LumaCaptureProbe";
+        RegisterClassW(&wc);
+        for (ProbeWindow& p : probes) {
+            DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+            if (p.kind != ProbeWindow::Kind::Normal)
+                ex |= WS_EX_LAYERED;
+            p.hwnd = CreateWindowExW(ex, wc.lpszClassName, L"probe", WS_POPUP, p.rect.left, p.rect.top,
+                                     p.rect.right - p.rect.left, p.rect.bottom - p.rect.top, nullptr, nullptr,
+                                     wc.hInstance, nullptr);
+            SetWindowLongPtrW(p.hwnd, GWLP_USERDATA, static_cast<LONG_PTR>(p.colour));
+            if (p.kind == ProbeWindow::Kind::LayeredAlpha)
+                SetLayeredWindowAttributes(p.hwnd, 0, 255, LWA_ALPHA);
+            if (p.kind == ProbeWindow::Kind::LayeredPerPixel)
+                paintPerPixel(p.hwnd, p.rect, p.colour, 235);
+            if (p.exclude && p.excludeBeforeShow)
+                applyAffinity(p);
+            ShowWindow(p.hwnd, SW_SHOWNOACTIVATE);
+            UpdateWindow(p.hwnd);
+            if (p.exclude && !p.excludeBeforeShow)
+                applyAffinity(p);
+        }
+        ready = true;
+        MSG msg;
+        while (!quit) {
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            Sleep(10);
+        }
+        for (ProbeWindow& p : probes)
+            DestroyWindow(p.hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    });
+    while (!ready)
+        std::this_thread::sleep_for(10ms);
+    std::this_thread::sleep_for(400ms); // let DWM compose them
+
+    // GDI screenshot of the same area (the v1 screenshot path).
+    const RECT row{probes.front().rect.left, probes.front().rect.top, probes.back().rect.right, probes.back().rect.bottom};
+    std::vector<Rgb> gdi;
+    try {
+        const auto shot = capture::screenshotRect(row, false);
+        for (const ProbeWindow& p : probes) {
+            const int cx = (p.rect.left + p.rect.right) / 2 - row.left, cy = (p.rect.top + p.rect.bottom) / 2 - row.top;
+            const uint32_t v = shot.pixels[static_cast<size_t>(cy) * shot.width + cx];
+            gdi.push_back({static_cast<int>((v >> 16) & 255), static_cast<int>((v >> 8) & 255), static_cast<int>(v & 255)});
+        }
+    } catch (const std::exception& e) {
+        luma::test::note(std::string("GDI screenshot failed: ") + e.what());
+    }
+
+    const auto file = testFile("exclusion.mkv");
+    std::error_code ec;
+    std::filesystem::remove(file, ec);
+    session::SessionConfig cfg;
+    cfg.source.kind = session::SourceKind::Display;
+    cfg.source.outputIndex = 0;
+    cfg.source.captureCursor = false;
+    cfg.fps = 30;
+    cfg.encoder.preset = "ultrafast";
+    cfg.encoder.crf = 18;
+    cfg.recordAudio = false;
+    cfg.outputFile = file;
+    {
+        auto session = std::make_shared<session::RecordingSession>(cfg);
+        session->start();
+        std::this_thread::sleep_for(2500ms);
+        session->stop();
+        CHECK_MSG(!session->failed(), session->errorMessage());
+    }
+    quit = true;
+    ui.join();
+
+    bool controlSeen = false;
+    for (size_t i = 0; i < probes.size(); ++i) {
+        const ProbeWindow& p = probes[i];
+        const int cx = (p.rect.left + p.rect.right) / 2 - 20, cy = (p.rect.top + p.rect.bottom) / 2 - 20;
+        const Rgb rec = samplePatch(file, 45, cx, cy, 40, 40);
+        const bool inVideo = rec.r >= 0 && colourDistance(rec, p.colour) < 60;
+        const bool inGdi = i < gdi.size() && colourDistance(gdi[i], p.colour) < 30;
+        if (!p.exclude)
+            controlSeen = inVideo;
+        luma::test::note(std::format("{:<58} affinity call {} (err {}, reads 0x{:X}) -> recording: {}, GDI screenshot: {}",
+                                     p.label, p.exclude ? (p.affinityOk ? "OK" : "FAILED") : "n/a", p.affinityError,
+                                     p.affinityRead, inVideo ? "VISIBLE" : "hidden", inGdi ? "VISIBLE" : "hidden"));
+    }
+    CHECK_MSG(controlSeen, "the non-excluded control window is not in the recording - the probe itself is broken");
 }
 
 TEST("hw", webcam_start_stop_cycles)

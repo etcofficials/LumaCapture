@@ -46,8 +46,12 @@ void EncodeLoop::onPacket(AVPacket* pkt)
 {
     const int64_t now = qpc::now();
     const size_t idx = static_cast<size_t>(pkt->pts) % kTrack;
-    if (m_trackPts[idx] == pkt->pts && m_encodeLatencyMs.size() < m_encodeLatencyMs.capacity())
-        m_encodeLatencyMs.push_back(static_cast<float>(qpc::toMs(now - m_trackQpc[idx])));
+    if (m_trackPts[idx] == pkt->pts) {
+        const double latencyMs = qpc::toMs(now - m_trackQpc[idx]);
+        m_counters.lastEncodeLatencyUs.store(static_cast<int64_t>(latencyMs * 1000.0), std::memory_order_relaxed);
+        if (m_encodeLatencyMs.size() < m_encodeLatencyMs.capacity())
+            m_encodeLatencyMs.push_back(static_cast<float>(latencyMs));
+    }
 
     ++m_counters.encoded;
     m_counters.encodedBytes += pkt->size;

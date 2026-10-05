@@ -5,11 +5,17 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <condition_variable>
+#include <cstdio>
 #include <cstring>
+#include <deque>
+#include <stdexcept>
+#include <thread>
 
 extern "C" {
 #include <libavutil/dict.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/mem.h>
 }
 
 namespace luma::mux {
@@ -23,16 +29,201 @@ std::string utf8Path(const std::filesystem::path& p)
 
 } // namespace
 
+// Writes the muxer's byte stream on its own thread. Every chunk carries its file
+// offset, so the muxer's seeks (Matroska rewrites header fields and cues at the end)
+// need no synchronisation with the writer. Bounded: above kMaxQueuedBytes the
+// producer waits (the encoder then slows down exactly as with direct writes).
+class AsyncFileSink {
+public:
+    explicit AsyncFileSink(const std::filesystem::path& path)
+    {
+        m_file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (m_file == INVALID_HANDLE_VALUE)
+            throw std::runtime_error("Cannot create output file " + utf8Path(path) + " (Windows error " +
+                                     std::to_string(GetLastError()) + ")");
+        m_thread = std::thread([this] { run(); });
+    }
+    ~AsyncFileSink()
+    {
+        try {
+            close();
+        } catch (const std::exception& e) {
+            log::error("Recording file: {}", e.what());
+        }
+    }
+    AsyncFileSink(const AsyncFileSink&) = delete;
+    AsyncFileSink& operator=(const AsyncFileSink&) = delete;
+
+    static int writeCallback(void* opaque, const uint8_t* buf, int size)
+    {
+        return static_cast<AsyncFileSink*>(opaque)->write(buf, size);
+    }
+    static int64_t seekCallback(void* opaque, int64_t offset, int whence)
+    {
+        return static_cast<AsyncFileSink*>(opaque)->seek(offset, whence);
+    }
+
+    // Waits until everything is written, then closes the file. Throws if a write failed.
+    void close()
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            if (m_closed)
+                return;
+            m_closed = true;
+            m_stop = true;
+        }
+        m_cv.notify_all();
+        if (m_thread.joinable())
+            m_thread.join();
+        if (m_file != INVALID_HANDLE_VALUE) {
+            CloseHandle(m_file);
+            m_file = INVALID_HANDLE_VALUE;
+        }
+        if (m_error != 0)
+            throw std::runtime_error("Writing the recording file failed (Windows error " + std::to_string(m_error) + ")");
+    }
+
+private:
+    struct Chunk {
+        int64_t offset = 0;
+        std::vector<uint8_t> data;
+    };
+    static constexpr size_t kMaxQueuedBytes = size_t{64} << 20; // ~10+ s of a 1080p recording
+    static constexpr size_t kChunkBytes = size_t{1} << 20;
+
+    int write(const uint8_t* data, int size)
+    {
+        if (size <= 0)
+            return 0;
+        std::unique_lock lock(m_mutex);
+        if (m_queuedBytes > kMaxQueuedBytes) {
+            if (!m_warnedFull) {
+                m_warnedFull = true;
+                log::warn("Recording file: the disk is not keeping up ({} MB waiting to be written)", m_queuedBytes >> 20);
+            }
+            m_space.wait(lock, [&] { return m_queuedBytes <= kMaxQueuedBytes || m_error != 0; });
+        }
+        if (m_error != 0)
+            return AVERROR(EIO);
+        // AVIO hands over its buffer in pieces; append contiguous data to the last chunk.
+        bool appended = false;
+        if (!m_queue.empty()) {
+            Chunk& last = m_queue.back();
+            if (last.offset + static_cast<int64_t>(last.data.size()) == m_pos && last.data.size() < kChunkBytes) {
+                last.data.insert(last.data.end(), data, data + size);
+                appended = true;
+            }
+        }
+        if (!appended)
+            m_queue.push_back(Chunk{m_pos, std::vector<uint8_t>(data, data + size)});
+        m_queuedBytes += static_cast<size_t>(size);
+        m_pos += size;
+        m_size = std::max(m_size, m_pos);
+        lock.unlock();
+        m_cv.notify_one();
+        return size;
+    }
+
+    int64_t seek(int64_t offset, int whence)
+    {
+        std::lock_guard lock(m_mutex);
+        switch (whence & ~AVSEEK_FORCE) {
+        case AVSEEK_SIZE: return m_size;
+        case SEEK_SET: m_pos = offset; break;
+        case SEEK_CUR: m_pos += offset; break;
+        case SEEK_END: m_pos = m_size + offset; break;
+        default: return AVERROR(EINVAL);
+        }
+        return m_pos;
+    }
+
+    DWORD writeAt(int64_t offset, const uint8_t* data, size_t size)
+    {
+        LARGE_INTEGER li{};
+        li.QuadPart = offset;
+        if (!SetFilePointerEx(m_file, li, nullptr, FILE_BEGIN))
+            return GetLastError();
+        while (size > 0) {
+            const DWORD n = static_cast<DWORD>(std::min<size_t>(size, kChunkBytes));
+            DWORD written = 0;
+            if (!WriteFile(m_file, data, n, &written, nullptr))
+                return GetLastError();
+            if (written == 0)
+                return ERROR_WRITE_FAULT;
+            data += written;
+            size -= written;
+        }
+        return 0;
+    }
+
+    void run()
+    {
+        SetThreadDescription(GetCurrentThread(), L"luma-file-writer");
+        std::unique_lock lock(m_mutex);
+        for (;;) {
+            m_cv.wait(lock, [&] { return m_stop || !m_queue.empty(); });
+            if (m_queue.empty()) {
+                if (m_stop)
+                    return; // everything written
+                continue;
+            }
+            Chunk chunk = std::move(m_queue.front());
+            m_queue.pop_front();
+            const bool failed = m_error != 0;
+            lock.unlock();
+            const DWORD err = failed ? 0 : writeAt(chunk.offset, chunk.data.data(), chunk.data.size());
+            lock.lock();
+            m_queuedBytes -= chunk.data.size();
+            if (err != 0 && m_error == 0) {
+                m_error = err;
+                log::error("Recording file: write failed (Windows error {})", err);
+            }
+            m_space.notify_all();
+        }
+    }
+
+    HANDLE m_file = INVALID_HANDLE_VALUE;
+    std::thread m_thread;
+    std::mutex m_mutex;
+    std::condition_variable m_cv;    // writer: work available / stop
+    std::condition_variable m_space; // producer: queue below the limit
+    std::deque<Chunk> m_queue;
+    size_t m_queuedBytes = 0;
+    int64_t m_pos = 0;  // the muxer's current position
+    int64_t m_size = 0; // logical file size (highest byte handed over)
+    DWORD m_error = 0;
+    bool m_stop = false;
+    bool m_closed = false;
+    bool m_warnedFull = false;
+};
+
 Muxer::Muxer(const std::filesystem::path& path, const char* formatName)
 {
     const std::string file = utf8Path(path);
     ff::check(avformat_alloc_output_context2(&m_fmt, nullptr, formatName, file.c_str()), "avformat_alloc_output_context2");
-    const int ret = avio_open(&m_fmt->pb, file.c_str(), AVIO_FLAG_WRITE);
-    if (ret < 0) {
+    try {
+        m_sink = std::make_unique<AsyncFileSink>(path);
+    } catch (...) {
         avformat_free_context(m_fmt);
         m_fmt = nullptr;
-        throw ff::Error("Cannot create output file " + file, ret);
+        throw;
     }
+    constexpr int kIoBuffer = 256 * 1024;
+    auto* buffer = static_cast<unsigned char*>(av_malloc(kIoBuffer));
+    AVIOContext* pb = buffer ? avio_alloc_context(buffer, kIoBuffer, 1, m_sink.get(), nullptr,
+                                                  &AsyncFileSink::writeCallback, &AsyncFileSink::seekCallback)
+                             : nullptr;
+    if (!pb) {
+        av_free(buffer);
+        m_sink.reset();
+        avformat_free_context(m_fmt);
+        m_fmt = nullptr;
+        throw std::bad_alloc();
+    }
+    m_fmt->pb = pb;
+    m_fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
 }
 
 Muxer::~Muxer()
@@ -46,9 +237,25 @@ Muxer::~Muxer()
             log::error("Muxer: finishing file failed: {}", e.what());
         }
     }
-    if (m_fmt->pb)
-        avio_closep(&m_fmt->pb);
+    try {
+        closeIo();
+    } catch (const std::exception& e) {
+        log::error("Muxer: closing file failed: {}", e.what());
+    }
     avformat_free_context(m_fmt);
+}
+
+void Muxer::closeIo()
+{
+    if (m_fmt && m_fmt->pb) {
+        avio_flush(m_fmt->pb);
+        av_freep(&m_fmt->pb->buffer);
+        avio_context_free(&m_fmt->pb);
+    }
+    if (m_sink) {
+        const auto sink = std::move(m_sink);
+        sink->close(); // drains the queue; throws on a write error
+    }
 }
 
 int Muxer::addStream(const AVCodecContext* enc, const std::string& title)
@@ -112,7 +319,7 @@ void Muxer::finish()
     m_finished = true;
     if (m_headerWritten)
         ff::check(av_write_trailer(m_fmt), "av_write_trailer");
-    ff::check(avio_closep(&m_fmt->pb), "Closing the recording file");
+    closeIo();
 }
 
 uint64_t Muxer::bytesWritten() const

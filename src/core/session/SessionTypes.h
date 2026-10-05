@@ -9,12 +9,15 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace luma::webcam { class FrameExchange; }
 
 namespace luma::session {
+
+class PreviewExchange;
 
 enum class SourceKind { Display, Window, Region };
 
@@ -43,6 +46,13 @@ struct SessionConfig {
     std::filesystem::path outputFile;
     std::string container = "matroska";
     unsigned expectedFrames = 0; // sizes the latency sample buffers (0 = no latency samples)
+
+    // Live preview (optional): the capture thread renders a small BGRA copy of the composed
+    // frame at most every previewIntervalMs and publishes it (GPU NV12 path only).
+    std::shared_ptr<PreviewExchange> preview;
+    unsigned previewIntervalMs = 100;
+    // Preview only: capture + composition for the preview; no encoder, audio or file.
+    bool previewOnly = false;
 };
 
 // One captured frame travelling from the capture thread to the encoder.
@@ -83,6 +93,10 @@ struct SessionCounters {
     std::atomic<int64_t> encoderBusyMicros{0}; // time inside send_frame/receive_packet
     std::atomic<int64_t> muxWriteMicros{0};
     std::atomic<int64_t> muxWriteMaxMicros{0};
+
+    // Most recent per-frame latencies (live diagnostics; the full samples are in LatencySamples).
+    std::atomic<int64_t> lastCaptureLatencyUs{0}; // tick -> frame in the encoder queue
+    std::atomic<int64_t> lastEncodeLatencyUs{0};  // queue entry -> packet out of the encoder
 
     int64_t dropped() const
     {

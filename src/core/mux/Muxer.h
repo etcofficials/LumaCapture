@@ -4,15 +4,22 @@
 
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace luma::mux {
 
+class AsyncFileSink;
+
 // Thread-safe multi-stream muxer (one video + N audio tracks). Packets from
 // the encoder threads are interleaved by FFmpeg. Matroska is the recording
 // container: an interrupted file stays playable.
+//
+// The file itself is written by a background thread (AsyncFileSink): a slow or
+// briefly stalling disk (HDD spin-up, sector retries) delays the writes, not the
+// encoder, as long as the buffered data stays below the sink's limit.
 class Muxer {
 public:
     Muxer(const std::filesystem::path& path, const char* formatName = "matroska");
@@ -32,7 +39,10 @@ public:
     uint64_t bytesWritten() const;
 
 private:
+    void closeIo();
+
     mutable std::mutex m_mutex;
+    std::unique_ptr<AsyncFileSink> m_sink;
     AVFormatContext* m_fmt = nullptr;
     bool m_headerWritten = false;
     bool m_finished = false;

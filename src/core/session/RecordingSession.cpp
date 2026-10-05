@@ -145,6 +145,10 @@ void RecordingSession::start()
     m_config.height &= ~1;
     if (m_config.width < 16 || m_config.height < 16)
         throw std::invalid_argument("Output size is too small");
+    if (m_config.previewOnly) {
+        startPreviewOnly();
+        return;
+    }
 
     // 1 ms scheduler granularity so capture timeouts land on the tick grid.
     m_timerPeriodSet = timeBeginPeriod(1) == TIMERR_NOERROR;
@@ -293,11 +297,62 @@ void RecordingSession::start()
               toUtf8(m_config.outputFile.wstring()));
 }
 
+void RecordingSession::startPreviewOnly()
+{
+    // CaptureLoop needs a pool and a queue; preview-only mode never uses them, so keep them minimal.
+    m_pool = std::make_unique<encode::FramePool>(m_config.width, m_config.height, 1);
+    m_queue = std::make_unique<BoundedQueue<FrameTicket>>(1);
+    m_composition->set(m_config.composition);
+    m_capture = std::make_unique<CaptureLoop>(m_config, *m_pool, *m_queue, m_counters, m_latency.captureMs, *m_pause,
+                                              *m_composition);
+
+    std::promise<void> ready;
+    auto readyFuture = ready.get_future();
+    m_captureThread = std::thread([this, &ready] {
+        SetThreadDescription(GetCurrentThread(), L"luma-preview");
+        ComScope com;
+        try {
+            m_capture->init();
+        } catch (...) {
+            ready.set_exception(std::current_exception());
+            return;
+        }
+        m_startQpc = qpc::now();
+        ready.set_value();
+        try {
+            m_capture->run(m_stop, m_startQpc);
+        } catch (const std::exception& e) {
+            log::warn("Preview capture stopped: {}", e.what());
+            setError(std::string("Preview failed: ") + e.what());
+        } catch (...) {
+            setError("Preview failed (unexpected error)");
+        }
+    });
+    try {
+        readyFuture.get();
+    } catch (...) {
+        m_captureThread.join();
+        throw;
+    }
+    m_info.width = m_config.width;
+    m_info.height = m_config.height;
+    m_info.fps = m_config.fps;
+    m_info.sourceWidth = m_capture->sourceWidth();
+    m_info.sourceHeight = m_capture->sourceHeight();
+    m_running = true;
+}
+
 void RecordingSession::stop()
 {
     std::lock_guard lifecycle(m_lifecycle);
     if (!m_running)
         return;
+    if (m_config.previewOnly) {
+        m_stop = true;
+        m_captureThread.join();
+        m_running = false;
+        return;
+    }
     const int64_t t0 = qpc::now();
     m_stop = true;
     m_captureThread.join(); // pushes its remaining readbacks into the queue
@@ -371,17 +426,21 @@ SessionStatus RecordingSession::status()
     if (start > 0)
         st.elapsedSeconds = qpc::toSeconds(now - start - m_pause->totalPaused(now));
     st.paused = m_pause->paused();
+    st.ticks = m_counters.ticks;
     st.capturedFrames = m_counters.enqueued;
+    st.uniqueFrames = m_counters.uniqueFrames;
+    st.repeatedFrames = m_counters.repeatedFrames;
     st.droppedFrames = m_counters.dropped();
     st.encodedFrames = m_counters.encoded;
     st.bytes = static_cast<uint64_t>(m_counters.encodedBytes.load()) + (m_audio ? m_audio->encodedBytes() : 0);
     st.queueDepth = queueDepth();
+    st.queueCapacity = m_config.queueCapacity;
+    st.captureLatencyMs = static_cast<double>(m_counters.lastCaptureLatencyUs.load()) / 1000.0;
+    st.encodeLatencyMs = static_cast<double>(m_counters.lastEncodeLatencyUs.load()) / 1000.0;
     if (m_capture)
         st.sourceStatus = m_capture->status();
     if (m_audio) {
         st.audioStatus = m_audio->status();
-        st.systemPeak = m_audio->takeSystemPeak();
-        st.micPeak = m_audio->takeMicPeak();
         st.micMuted = m_audio->micMuted();
         if (m_audio->failed())
             setError("Audio recording failed: " + m_audio->error());
@@ -389,6 +448,15 @@ SessionStatus RecordingSession::status()
     st.failed = m_failed;
     st.error = errorMessage();
     return st;
+}
+
+void RecordingSession::takeAudioPeaks(float& system, float& mic)
+{
+    system = mic = 0.f;
+    if (m_audio) {
+        system = m_audio->takeSystemPeak();
+        mic = m_audio->takeMicPeak();
+    }
 }
 
 } // namespace luma::session

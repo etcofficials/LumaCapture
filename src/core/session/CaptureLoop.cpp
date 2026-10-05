@@ -2,6 +2,7 @@
 
 #include "capture/DesktopDuplicator.h"
 #include "capture/WindowCapture.h"
+#include "session/PreviewExchange.h"
 #include "util/HResult.h"
 #include "util/Log.h"
 #include "util/ProcessMetrics.h"
@@ -124,10 +125,13 @@ void CaptureLoop::buildPipeline()
 void CaptureLoop::buildCompositor()
 {
     m_ring.reset();
+    resetPreview();
     m_compositor.reset();
     const auto w = static_cast<unsigned>(m_config.width), h = static_cast<unsigned>(m_config.height);
     m_compositor = std::make_unique<gpu::Compositor>(m_device->device(), w, h, m_config.cpuConvert);
-    if (m_config.cpuConvert) {
+    if (m_config.previewOnly) {
+        // Nothing is read back for encoding in preview-only mode.
+    } else if (m_config.cpuConvert) {
         m_ring = std::make_unique<gpu::ReadbackRing>(
             m_device->device(), std::vector<ID3D11Texture2D*>{m_compositor->bgraTexture()}, m_config.readbackSlots);
         // Composition and scaling happen on the GPU; libswscale only converts BGRA -> NV12.
@@ -152,6 +156,7 @@ void CaptureLoop::buildCompositor()
 void CaptureLoop::destroyPipeline()
 {
     m_ring.reset();
+    resetPreview();
     m_compositor.reset();
     m_source.reset();
     m_device.reset();
@@ -178,10 +183,14 @@ void CaptureLoop::run(const std::atomic<bool>& stop, int64_t startQpc)
                 if (timeoutMs > 0) {
                     // While a readback is in flight, wake every kReadbackPollMs to hand it
                     // to the encoder as soon as the GPU finishes, instead of at the next tick.
-                    if (m_ring->inFlight() > 0)
+                    if (m_ring && m_ring->inFlight() > 0)
                         timeoutMs = std::min(timeoutMs, kReadbackPollMs);
+                    else if (m_previewPending)
+                        timeoutMs = std::min(timeoutMs, 10u);
                     waitForSource(timeoutMs);
                     drainPending(false);
+                    if (m_previewPending)
+                        servicePreview();
                     continue;
                 }
             }
@@ -336,10 +345,12 @@ void CaptureLoop::updateInputs()
 void CaptureLoop::processTick(int64_t pts, int64_t tickQpc)
 {
     ++m_counters.ticks;
-    const auto depth = static_cast<int64_t>(m_queue.size());
-    m_counters.queueDepthSum += depth;
-    ++m_counters.queueDepthSamples;
-    atomicMax(m_counters.queueDepthMax, depth);
+    if (!m_config.previewOnly) {
+        const auto depth = static_cast<int64_t>(m_queue.size());
+        m_counters.queueDepthSum += depth;
+        ++m_counters.queueDepthSamples;
+        atomicMax(m_counters.queueDepthMax, depth);
+    }
 
     updateInputs();
     if (m_source->takeDirty()) {
@@ -347,8 +358,22 @@ void CaptureLoop::processTick(int64_t pts, int64_t tickQpc)
         m_dirty = true;
     }
 
+    if (m_config.previewOnly) {
+        // Nothing is encoded: compose only changed pictures, for the preview.
+        if (m_dirty && m_source->hasImage()) {
+            const gpu::FrameInputs in = frameInputs();
+            m_compositor->render(m_device->context(), in);
+            m_device->context()->Flush();
+            m_dirty = false;
+            m_previewDirty = true;
+        }
+        servicePreview();
+        return;
+    }
+
     if (!m_dirty || !m_source->hasImage()) {
         pushPending({false, -1, pts, tickQpc}); // repeat previous picture (or no image yet)
+        servicePreview();
         return;
     }
 
@@ -360,6 +385,22 @@ void CaptureLoop::processTick(int64_t pts, int64_t tickQpc)
     if (m_ring->full())
         drainPending(true); // the only place the capture thread may wait on the GPU
 
+    const gpu::FrameInputs in = frameInputs();
+    ID3D11DeviceContext* ctx = m_device->context();
+    m_compositor->render(ctx, in);
+    if (m_config.cpuConvert)
+        m_ring->submit(ctx, {m_compositor->bgraTexture()});
+    else
+        m_ring->submit(ctx, {m_compositor->yTexture(), m_compositor->uvTexture()});
+    m_previewDirty = true;
+    servicePreview(); // queued behind the encoder readback; never waits on the GPU
+    ctx->Flush();     // start GPU work now; it is read back shortly after
+    pushPending({true, slot, pts, tickQpc});
+    m_dirty = false;
+}
+
+gpu::FrameInputs CaptureLoop::frameInputs()
+{
     gpu::FrameInputs in;
     in.source = m_source->srv();
     in.srcWidth = m_source->width();
@@ -383,16 +424,73 @@ void CaptureLoop::processTick(int64_t pts, int64_t tickQpc)
                                               static_cast<float>(c.pos.y - origin.y), static_cast<float>(age), c.button};
         }
     }
+    return in;
+}
 
+void CaptureLoop::resetPreview()
+{
+    m_previewStaging.Reset();
+    m_previewW = m_previewH = 0;
+    m_previewPending = false;
+    m_previewDirty = false;
+    m_lastPreviewQpc = 0;
+}
+
+void CaptureLoop::servicePreview()
+{
+    if (!m_config.preview || m_config.cpuConvert || !m_compositor || !m_device)
+        return;
     ID3D11DeviceContext* ctx = m_device->context();
-    m_compositor->render(ctx, in);
-    if (m_config.cpuConvert)
-        m_ring->submit(ctx, {m_compositor->bgraTexture()});
-    else
-        m_ring->submit(ctx, {m_compositor->yTexture(), m_compositor->uvTexture()});
-    ctx->Flush(); // start GPU work now; it is read back shortly after
-    pushPending({true, slot, pts, tickQpc});
-    m_dirty = false;
+
+    // 1) Hand over the copy started earlier, if the GPU has finished it.
+    if (m_previewPending) {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        const HRESULT hr = ctx->Map(m_previewStaging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
+            return; // not ready: try again on a later wake-up
+        check(hr, "Map(preview staging)");
+        m_config.preview->publish(static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch, m_previewW, m_previewH);
+        ctx->Unmap(m_previewStaging.Get(), 0);
+        m_previewPending = false;
+    }
+
+    // 2) Start a new copy when there is a newer picture and the interval has passed.
+    if (!m_previewDirty)
+        return;
+    const int64_t now = qpc::now();
+    if (m_lastPreviewQpc != 0 && qpc::toMs(now - m_lastPreviewQpc) < m_config.previewIntervalMs * 0.8)
+        return;
+    unsigned reqW = 0, reqH = 0;
+    m_config.preview->requestedSize(reqW, reqH);
+    if (reqW < 16 || reqH < 16)
+        return; // nobody is looking at the preview right now
+    // Fit the requested box with the output aspect ratio; never larger than the output.
+    const double scale = std::min({static_cast<double>(reqW) / m_config.width,
+                                   static_cast<double>(reqH) / m_config.height, 1.0});
+    const unsigned pw = std::max(16u, static_cast<unsigned>(m_config.width * scale) & ~1u);
+    const unsigned ph = std::max(16u, static_cast<unsigned>(m_config.height * scale) & ~1u);
+    if (!m_compositor->ensurePreview(pw, ph))
+        return;
+    if (!m_previewStaging || pw != m_previewW || ph != m_previewH) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = pw;
+        desc.Height = ph;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        m_previewStaging.Reset();
+        check(m_device->device()->CreateTexture2D(&desc, nullptr, &m_previewStaging), "CreateTexture2D(preview staging)");
+        m_previewW = pw;
+        m_previewH = ph;
+    }
+    m_compositor->renderPreview(ctx);
+    ctx->CopyResource(m_previewStaging.Get(), m_compositor->previewTexture());
+    m_previewPending = true;
+    m_previewDirty = false;
+    m_lastPreviewQpc = now;
 }
 
 void CaptureLoop::pushPending(const Pending& p)
@@ -472,8 +570,10 @@ void CaptureLoop::enqueue(int slot, int64_t pts, int64_t tickQpc, bool unique)
     }
     ++m_counters.enqueued;
     ++(unique ? m_counters.uniqueFrames : m_counters.repeatedFrames);
+    const double latencyMs = qpc::toMs(now - tickQpc);
+    m_counters.lastCaptureLatencyUs.store(static_cast<int64_t>(latencyMs * 1000.0), std::memory_order_relaxed);
     if (m_captureLatencyMs.size() < m_captureLatencyMs.capacity())
-        m_captureLatencyMs.push_back(static_cast<float>(qpc::toMs(now - tickQpc)));
+        m_captureLatencyMs.push_back(static_cast<float>(latencyMs));
 }
 
 void CaptureLoop::handleDeviceLost(const std::exception& e)

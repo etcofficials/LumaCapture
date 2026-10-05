@@ -42,22 +42,29 @@ struct SessionInfo {
 struct SessionStatus {
     double elapsedSeconds = 0;  // recorded time (pauses excluded)
     bool paused = false;
-    int64_t capturedFrames = 0;
+    int64_t ticks = 0;          // capture ticks processed (target frames so far)
+    int64_t capturedFrames = 0; // frames handed to the encoder
+    int64_t uniqueFrames = 0;   // ... with new screen content
+    int64_t repeatedFrames = 0; // ... repeating an unchanged screen (not a drop)
     int64_t droppedFrames = 0;
     int64_t encodedFrames = 0;
     uint64_t bytes = 0;         // encoded audio + video
     size_t queueDepth = 0;
+    size_t queueCapacity = 0;
+    double captureLatencyMs = 0; // most recent frame: tick -> encoder queue
+    double encodeLatencyMs = 0;  // most recent frame: queue -> compressed packet
     std::string sourceStatus;   // e.g. "window minimized"
     std::string audioStatus;
     bool failed = false;
     std::string error;
-    float systemPeak = 0, micPeak = 0; // since the previous snapshot
     bool micMuted = false;
 };
 
 // One recording: capture thread + encoder thread around a bounded queue,
 // plus the audio engine, all writing into one muxer. Qt-free: the GUI and
 // luma-bench share exactly this code.
+// With SessionConfig::previewOnly the same capture/composition path runs for the
+// live preview only: no encoder thread, no audio, no file.
 class RecordingSession {
 public:
     explicit RecordingSession(SessionConfig config);
@@ -84,6 +91,8 @@ public:
     void setComposition(const gpu::CompositionSettings& s);
 
     SessionStatus status();
+    // Audio meter peaks (linear, 0..1) since the previous call; cheap, for ~25 Hz meters.
+    void takeAudioPeaks(float& system, float& mic);
     bool failed() const { return m_failed.load(); }
     std::string errorMessage() const;
 
@@ -100,6 +109,7 @@ public:
     double stopDurationMs() const { return m_stopMs; }
 
 private:
+    void startPreviewOnly();
     void setError(const std::string& message);
     void writeRecoveryMarker();
     void removeRecoveryMarker();

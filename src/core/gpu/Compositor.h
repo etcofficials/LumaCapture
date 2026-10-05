@@ -47,6 +47,15 @@ public:
 
     void render(ID3D11DeviceContext* ctx, const FrameInputs& in);
 
+    // Live preview (NV12 output only): a small BGRA image converted back from the Y/UV
+    // planes rendered by the last render() call - i.e. exactly what is being encoded.
+    // ensurePreview() (re)creates the preview target; returns false on the BGRA path.
+    bool ensurePreview(unsigned width, unsigned height);
+    void renderPreview(ID3D11DeviceContext* ctx);
+    ID3D11Texture2D* previewTexture() const { return m_previewTex.Get(); }
+    unsigned previewWidth() const { return m_previewW; }
+    unsigned previewHeight() const { return m_previewH; }
+
     ID3D11Texture2D* yTexture() const { return m_yTex.Get(); }
     ID3D11Texture2D* uvTexture() const { return m_uvTex.Get(); }
     ID3D11Texture2D* bgraTexture() const { return m_bgraTex.Get(); }
@@ -65,6 +74,13 @@ private:
     ComPtr<ID3D11Buffer> m_params;
     ComPtr<ID3D11Texture2D> m_yTex, m_uvTex, m_bgraTex;
     ComPtr<ID3D11RenderTargetView> m_yRtv, m_uvRtv, m_bgraRtv;
+    ComPtr<ID3D11ShaderResourceView> m_ySrv, m_uvSrv; // NV12 planes as preview input
+
+    ComPtr<ID3D11PixelShader> m_psPreview;
+    ComPtr<ID3D11Buffer> m_previewParams;
+    ComPtr<ID3D11Texture2D> m_previewTex;
+    ComPtr<ID3D11RenderTargetView> m_previewRtv;
+    unsigned m_previewW = 0, m_previewH = 0;
 
     CompositionSettings m_settings;
     std::shared_ptr<const OverlayImage> m_uploadedOverlay;

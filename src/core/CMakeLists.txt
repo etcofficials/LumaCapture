@@ -34,6 +34,7 @@ luma_compile_shader(luma_core "${_hlsl}" VSMain       vs_4_0 g_VSMain)
 luma_compile_shader(luma_core "${_hlsl}" PS_Y         ps_4_0 g_PS_Y)
 luma_compile_shader(luma_core "${_hlsl}" PS_UV        ps_4_0 g_PS_UV)
 luma_compile_shader(luma_core "${_hlsl}" PS_Composite ps_4_0 g_PS_Composite)
+luma_compile_shader(luma_core "${_hlsl}" PS_Preview   ps_4_0 g_PS_Preview)
 
 target_include_directories(luma_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(luma_core PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _WIN32_WINNT=0x0A00)
