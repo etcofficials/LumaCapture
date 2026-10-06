@@ -11,7 +11,10 @@
 #include <QSize>
 #include <QTimer>
 
+#include <deque>
 #include <memory>
+
+namespace luma::session { class PreviewExchange; }
 
 namespace luma::app {
 
@@ -49,12 +52,21 @@ public:
 
     void setWindowTarget(quintptr hwnd) { m_window = hwnd; }
     quintptr windowTarget() const { return m_window; }
+    void setGameTarget(quintptr hwnd) { m_game = hwnd; }
+    quintptr gameTarget() const { return m_game; }
+    // Live preview: frames of the running recording are published here (optional).
+    void setPreviewExchange(std::shared_ptr<session::PreviewExchange> exchange) { m_preview = std::move(exchange); }
 
     // Source/output geometry for the current settings (no device access).
     QSize sourceSize() const;
     QSize outputSize() const;
-    QString sourceDescription() const;
-    QString validateSource() const; // empty if the source can be recorded
+    QString sourceDescription() const;   // "Display 1", "Window "Notepad"", ...
+    QString validateSource() const;      // empty if the source can be recorded
+    // Screen rectangle (physical px) that a Display/Region/Game recording covers; empty for Window.
+    QRect capturedScreenRect() const;
+
+    // Session config for an idle live preview (no encoder/audio/file); empty error = OK.
+    session::SessionConfig buildPreviewConfig(QString& error);
 
     void start();
     void stop();
@@ -62,6 +74,8 @@ public:
     void setMicMuted(bool muted);
     // Pushes composition / audio levels / mic processing to a running recording.
     void updateLive();
+    // Audio meter peaks since the previous call (0 when not recording).
+    void takeAudioPeaks(float& system, float& mic);
 
     void takeScreenshot();
     void scanForRecovery();
@@ -72,16 +86,20 @@ signals:
     void statusTick();
     void errorOccurred(const QString& title, const QString& message);
     void info(const QString& message);
+    void fallingBehind(double dropPercent);
     void recordingSaved(const QString& file, bool withErrors);
+    void screenshotSaved(const QString& file);
     void recoveryFound(const QList<luma::app::RecoveryCandidate>& items);
     void historyChanged();
 
 private:
     bool apply(session::RecEvent e);
+    bool fillSource(session::SourceConfig& src, QString& error) const;
     session::SessionConfig buildConfig(QString& error);
-    gpu::CompositionSettings buildComposition(int outW, int outH);
+    gpu::CompositionSettings buildComposition(int outW, int outH, bool withWebcam);
     QString makeOutputPath() const;
     int monitorIndex(QRect* rect) const;
+    int monitorOfWindow(quintptr hwnd, QRect* rect) const;
     void pollStatus();
 
     AppSettings& m_settings;
@@ -91,15 +109,20 @@ private:
     OverlayRenderer m_overlay;
 
     std::shared_ptr<session::RecordingSession> m_session;
+    std::shared_ptr<session::PreviewExchange> m_preview;
     State m_state = State::Idle;
     session::SessionStatus m_lastStatus;
     QString m_currentFile, m_lastFile;
     quintptr m_window = 0;
+    quintptr m_game = 0;
     QSize m_outSize;
     QTimer m_statusTimer;
     QElapsedTimer m_finishClock;
     int m_diskCheckCounter = 0;
     bool m_stopRequestedByError = false;
+    // Falling-behind detection: (ticks, dropped) samples over the last few seconds.
+    std::deque<std::pair<int64_t, int64_t>> m_dropWindow;
+    QElapsedTimer m_lastBehindWarning;
 };
 
 } // namespace luma::app

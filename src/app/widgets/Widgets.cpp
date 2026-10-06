@@ -1,20 +1,22 @@
 #include "widgets/Widgets.h"
 
-#include "Icons.h"
 #include "Theme.h"
 
+#include <QEnterEvent>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
-#include <QScreen>
 #include <QPushButton>
+#include <QRegion>
+#include <QScreen>
 #include <QStyle>
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <cmath>
 
 namespace luma::app {
@@ -25,7 +27,7 @@ ToggleSwitch::ToggleSwitch(QWidget* parent) : QWidget(parent)
 {
     setFocusPolicy(Qt::StrongFocus);
     setCursor(Qt::PointingHandCursor);
-    setFixedSize(38, 22);
+    setFixedSize(36, 20);
 }
 
 void ToggleSwitch::setChecked(bool on)
@@ -42,7 +44,7 @@ void ToggleSwitch::paintEvent(QPaintEvent*)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     const Palette& pal = currentPalette();
-    const QRectF track = QRectF(rect()).adjusted(1, 3, -1, -3);
+    const QRectF track = QRectF(rect()).adjusted(1, 2, -1, -2);
     QColor trackColor = m_checked ? pal.accent : pal.border;
     if (!isEnabled())
         trackColor.setAlphaF(0.4f);
@@ -76,11 +78,11 @@ StatTile::StatTile(const QString& caption, QWidget* parent) : QWidget(parent)
 {
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
-    v->setSpacing(2);
+    v->setSpacing(1);
     m_caption = new QLabel(caption, this);
-    m_caption->setObjectName("TileCaption");
+    m_caption->setObjectName("Hint");
     m_value = new QLabel(QStringLiteral("-"), this);
-    m_value->setObjectName("TileValue");
+    m_value->setObjectName("Value");
     v->addWidget(m_caption);
     v->addWidget(m_value);
 }
@@ -88,7 +90,7 @@ StatTile::StatTile(const QString& caption, QWidget* parent) : QWidget(parent)
 void StatTile::setValue(const QString& value, bool warn)
 {
     m_value->setText(value);
-    m_value->setProperty("warn", warn);
+    m_value->setObjectName(warn ? "Warn" : "Value");
     m_value->style()->unpolish(m_value);
     m_value->style()->polish(m_value);
 }
@@ -99,7 +101,7 @@ Banner::Banner(QWidget* parent) : QFrame(parent)
 {
     setObjectName("Banner");
     auto* h = new QHBoxLayout(this);
-    h->setContentsMargins(12, 8, 8, 8);
+    h->setContentsMargins(12, 6, 6, 6);
     h->setSpacing(10);
     m_icon = new QLabel(this);
     m_icon->setFixedWidth(10);
@@ -109,7 +111,7 @@ Banner::Banner(QWidget* parent) : QFrame(parent)
     m_action = new QPushButton(this);
     m_action->setObjectName("Flat");
     auto* close = new QToolButton(this);
-    close->setText(QStringLiteral("✕"));
+    close->setIcon(makeIcon(IconId::Close, currentPalette().textDim));
     close->setToolTip(QStringLiteral("Dismiss"));
     close->setAccessibleName(QStringLiteral("Dismiss notification"));
     h->addWidget(m_icon);
@@ -164,36 +166,38 @@ LevelMeter::LevelMeter(QWidget* parent) : QWidget(parent)
 void LevelMeter::setLevel(float linearPeak)
 {
     const float db = linearPeak > 1e-5f ? 20.f * std::log10(linearPeak) : -60.f;
-    m_db = db > m_db ? db : std::max(db, m_db - 3.f); // fast attack, ~45 dB/s decay at 15 Hz
+    const float old = m_db, oldHold = m_hold;
+    m_db = db > m_db ? db : std::max(db, m_db - 2.f); // fast attack, ~50 dB/s decay at 25 Hz
     if (m_db >= m_hold || m_holdTimer.elapsed() > 1200) {
         m_hold = m_db;
         m_holdTimer.restart();
     }
+    if (std::abs(m_db - old) > 0.3f || m_hold != oldHold) // repaint only when something visibly changes
+        update();
+}
+
+void LevelMeter::reset()
+{
+    m_db = m_hold = -60.f;
     update();
 }
 
 void LevelMeter::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
     const Palette& pal = currentPalette();
-    const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
-    p.setPen(Qt::NoPen);
-    p.setBrush(pal.surfaceAlt);
-    p.drawRoundedRect(r, 3, 3);
+    constexpr int kSegments = 24;
+    const int gap = 2;
+    const double segW = (width() - gap * (kSegments - 1)) / static_cast<double>(kSegments);
     auto frac = [](float db) { return std::clamp((db + 60.f) / 60.f, 0.f, 1.f); };
-    const double w = r.width() * frac(m_db);
-    QLinearGradient g(r.topLeft(), r.topRight());
-    g.setColorAt(0.0, pal.success);
-    g.setColorAt(0.75, pal.success);
-    g.setColorAt(0.9, pal.warning);
-    g.setColorAt(1.0, pal.record);
-    p.setBrush(g);
-    p.drawRoundedRect(QRectF(r.left(), r.top(), w, r.height()), 3, 3);
-    if (m_hold > -59.f) {
-        const double hx = r.left() + r.width() * frac(m_hold);
-        p.setPen(QPen(pal.text, 1.5));
-        p.drawLine(QPointF(hx, r.top() + 1), QPointF(hx, r.bottom() - 1));
+    const int lit = static_cast<int>(std::ceil(frac(m_db) * kSegments - 0.01));
+    const int hold = m_hold > -59.f ? static_cast<int>(std::ceil(frac(m_hold) * kSegments - 0.01)) - 1 : -1;
+    for (int i = 0; i < kSegments; ++i) {
+        const QRectF seg(i * (segW + gap), 0, segW, height());
+        QColor c = i >= kSegments - 2 ? pal.record : (i >= kSegments - 6 ? pal.warning : pal.success);
+        if (i >= lit && i != hold)
+            c = pal.surfaceAlt;
+        p.fillRect(seg, c);
     }
 }
 
@@ -203,6 +207,7 @@ WebcamPreview::WebcamPreview(QWidget* parent) : QWidget(parent)
 {
     setMinimumSize(160, 90);
     setAccessibleName(QStringLiteral("Webcam preview"));
+    setAttribute(Qt::WA_OpaquePaintEvent);
 }
 
 void WebcamPreview::setFrame(const QImage& frame)
@@ -260,13 +265,11 @@ void WebcamPreview::drawImage(QPainter& p, const QImage& img, const QRectF& area
 
 void WebcamPreview::paintEvent(QPaintEvent*)
 {
+    // No rounded clip path or antialiasing here: this repaints at the camera rate, and
+    // an antialiased clip forces Qt's slowest software path (v1 did that).
     QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::SmoothPixmapTransform);
     const Palette& pal = currentPalette();
-    QPainterPath clip;
-    clip.addRoundedRect(QRectF(rect()), 10, 10);
-    p.setClipPath(clip);
     p.fillRect(rect(), QColor(8, 9, 12));
     if (m_frame.isNull()) {
         p.setPen(pal.textDim);
@@ -285,9 +288,7 @@ void WebcamPreview::paintEvent(QPaintEvent*)
         p.setFont(f);
         auto tag = [&](const QRectF& area, const QString& text) {
             const QRectF t(area.left() + 8, area.top() + 8, 64, 20);
-            p.setPen(Qt::NoPen);
-            p.setBrush(QColor(0, 0, 0, 160));
-            p.drawRoundedRect(t, 6, 6);
+            p.fillRect(t, QColor(0, 0, 0, 170));
             p.setPen(Qt::white);
             p.drawText(t, Qt::AlignCenter, text);
         };
@@ -296,6 +297,284 @@ void WebcamPreview::paintEvent(QPaintEvent*)
     } else {
         drawImage(p, m_frame, QRectF(rect()));
     }
+}
+
+// --------------------------------------------------------------- PreviewView
+
+PreviewView::PreviewView(QWidget* parent) : QWidget(parent)
+{
+    setAttribute(Qt::WA_OpaquePaintEvent);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    setAccessibleName(QStringLiteral("Recording preview"));
+}
+
+void PreviewView::setFrame(const QImage& frame)
+{
+    m_frame = frame;
+    update();
+}
+
+void PreviewView::clearFrame()
+{
+    m_frame = QImage();
+    update();
+}
+
+void PreviewView::setMessage(const QString& text)
+{
+    if (text == m_message)
+        return;
+    m_message = text;
+    update();
+}
+
+void PreviewView::setInfo(const QString& text)
+{
+    if (text == m_info)
+        return;
+    m_info = text;
+    update();
+}
+
+void PreviewView::setRecording(bool recording, bool paused)
+{
+    m_recording = recording;
+    m_paused = paused;
+    update();
+}
+
+QSize PreviewView::pixelSize() const
+{
+    return (QSizeF(size()) * devicePixelRatioF()).toSize();
+}
+
+void PreviewView::resizeEvent(QResizeEvent* e)
+{
+    QWidget::resizeEvent(e);
+    emit resized();
+}
+
+void PreviewView::paintEvent(QPaintEvent*)
+{
+    QPainter p(this);
+    const Palette& pal = currentPalette();
+    p.fillRect(rect(), QColor(6, 7, 10));
+    QRectF imageRect;
+    if (!m_frame.isNull()) {
+        const QSizeF logical = QSizeF(m_frame.size()) / devicePixelRatioF();
+        const QSizeF s = logical.scaled(QSizeF(size()), Qt::KeepAspectRatio);
+        imageRect = QRectF((width() - s.width()) / 2, (height() - s.height()) / 2, s.width(), s.height());
+        // Frames are produced at about the widget's pixel size: smooth scaling only if they differ a lot.
+        if (std::abs(s.width() - logical.width()) > logical.width() * 0.1)
+            p.setRenderHint(QPainter::SmoothPixmapTransform);
+        p.drawImage(imageRect, m_frame);
+    }
+    QFont small = font();
+    small.setPointSizeF(8.5);
+    p.setFont(small);
+    const QFontMetrics fm(small);
+    if (!m_message.isEmpty()) {
+        if (!m_frame.isNull())
+            p.fillRect(rect(), QColor(0, 0, 0, 150));
+        p.setPen(pal.textDim);
+        QFont f = font();
+        f.setPointSizeF(10);
+        p.setFont(f);
+        p.drawText(rect().adjusted(24, 24, -24, -24), Qt::AlignCenter | Qt::TextWordWrap, m_message);
+        p.setFont(small);
+    }
+    if (!m_info.isEmpty()) {
+        const int w = fm.horizontalAdvance(m_info) + 18;
+        const QRect chip(width() - w - 10, 10, w, fm.height() + 8);
+        p.fillRect(chip, QColor(10, 12, 16, 210));
+        p.setPen(QColor(0xE6, 0xE9, 0xEF));
+        p.drawText(chip, Qt::AlignCenter, m_info);
+    }
+    if (m_recording) {
+        const QString text = m_paused ? QStringLiteral("PAUSED") : QStringLiteral("REC");
+        const QRect badge(10, 10, fm.horizontalAdvance(text) + 28, fm.height() + 8);
+        p.fillRect(badge, QColor(10, 12, 16, 210));
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(m_paused ? pal.warning : pal.record);
+        p.drawEllipse(QPointF(badge.left() + 11, badge.center().y() + 0.5), 4, 4);
+        p.setPen(Qt::white);
+        p.drawText(badge.adjusted(20, 0, -6, 0), Qt::AlignVCenter | Qt::AlignLeft, text);
+    }
+}
+
+// ---------------------------------------------------------------- ModeButton
+
+ModeButton::ModeButton(IconId icon, const QString& title, const QString& subtitle, QWidget* parent)
+    : QAbstractButton(parent), m_icon(icon), m_title(title), m_subtitle(subtitle)
+{
+    setCheckable(true);
+    setFocusPolicy(Qt::StrongFocus);
+    setCursor(Qt::PointingHandCursor);
+    setAccessibleName(title);
+    setAccessibleDescription(subtitle);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+}
+
+QSize ModeButton::sizeHint() const
+{
+    return {220, 46};
+}
+
+void ModeButton::enterEvent(QEnterEvent* e)
+{
+    QAbstractButton::enterEvent(e);
+    update();
+}
+
+void ModeButton::leaveEvent(QEvent* e)
+{
+    QAbstractButton::leaveEvent(e);
+    update();
+}
+
+void ModeButton::paintEvent(QPaintEvent*)
+{
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    const Palette& pal = currentPalette();
+    const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+    if (isChecked()) {
+        p.setPen(QPen(pal.accent, 1));
+        p.setBrush(pal.selected);
+        p.drawRoundedRect(r, 6, 6);
+    } else if (underMouse() || hasFocus()) {
+        p.setPen(hasFocus() ? QPen(pal.accent, 1) : Qt::NoPen);
+        p.setBrush(pal.surfaceAlt);
+        p.drawRoundedRect(r, 6, 6);
+    }
+    const QColor iconColor = isEnabled() ? (isChecked() ? pal.accent : pal.text) : pal.textDim;
+    makeIcon(m_icon, iconColor).paint(&p, QRect(12, (height() - 22) / 2, 22, 22));
+    QFont f = font();
+    f.setPointSizeF(9.5);
+    f.setWeight(QFont::DemiBold);
+    p.setFont(f);
+    p.setPen(isEnabled() ? pal.text : pal.textDim);
+    const QRect textRect(46, 5, width() - 52, height() / 2 - 3);
+    p.drawText(textRect, Qt::AlignLeft | Qt::AlignBottom, m_title);
+    f.setPointSizeF(8);
+    f.setWeight(QFont::Normal);
+    p.setFont(f);
+    p.setPen(pal.textDim);
+    p.drawText(QRect(46, height() / 2 + 1, width() - 52, height() / 2 - 5), Qt::AlignLeft | Qt::AlignTop,
+               p.fontMetrics().elidedText(m_subtitle, Qt::ElideRight, width() - 52));
+}
+
+// ----------------------------------------------------------- TransportButton
+
+TransportButton::TransportButton(const QString& caption, int diameter, QWidget* parent)
+    : QAbstractButton(parent), m_diameter(diameter), m_caption(caption)
+{
+    setFocusPolicy(Qt::StrongFocus);
+    setCursor(Qt::PointingHandCursor);
+    setAccessibleName(caption);
+    m_fill = currentPalette().surfaceAlt;
+    m_iconColor = currentPalette().text;
+}
+
+void TransportButton::setVisual(IconId icon, const QColor& fill, const QColor& iconColor)
+{
+    m_icon = icon;
+    m_fill = fill;
+    m_iconColor = iconColor;
+    update();
+}
+
+void TransportButton::setCaption(const QString& caption)
+{
+    m_caption = caption;
+    setAccessibleName(caption);
+    updateGeometry();
+    update();
+}
+
+QSize TransportButton::sizeHint() const
+{
+    const int textW = fontMetrics().horizontalAdvance(m_caption) + 8;
+    return {std::max(m_diameter + 8, textW), m_diameter + fontMetrics().height() + 8};
+}
+
+void TransportButton::enterEvent(QEnterEvent* e)
+{
+    QAbstractButton::enterEvent(e);
+    update();
+}
+
+void TransportButton::leaveEvent(QEvent* e)
+{
+    QAbstractButton::leaveEvent(e);
+    update();
+}
+
+void TransportButton::paintEvent(QPaintEvent*)
+{
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    const Palette& pal = currentPalette();
+    const QRectF circle((width() - m_diameter) / 2.0, 2, m_diameter, m_diameter);
+    QColor fill = m_fill;
+    if (!isEnabled())
+        fill = pal.surfaceAlt;
+    else if (isDown())
+        fill = fill.darker(115);
+    else if (underMouse())
+        fill = fill.lighter(112);
+    p.setPen(hasFocus() ? QPen(pal.text, 2) : QPen(pal.border, 1));
+    p.setBrush(fill);
+    p.drawEllipse(circle.adjusted(1, 1, -1, -1));
+    const int iconSize = m_diameter * 4 / 10;
+    const QRect iconRect(static_cast<int>(circle.center().x() - iconSize / 2.0),
+                         static_cast<int>(circle.center().y() - iconSize / 2.0), iconSize, iconSize);
+    makeIcon(m_icon, isEnabled() ? m_iconColor : pal.textDim).paint(&p, iconRect);
+    p.setPen(isEnabled() ? pal.text : pal.textDim);
+    p.drawText(QRect(0, static_cast<int>(circle.bottom()) + 4, width(), fontMetrics().height() + 2),
+               Qt::AlignHCenter | Qt::AlignTop, m_caption);
+}
+
+// -------------------------------------------------------- CollapsibleSection
+
+CollapsibleSection::CollapsibleSection(const QString& title, QWidget* parent, bool expanded) : QWidget(parent)
+{
+    auto* v = new QVBoxLayout(this);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(4);
+    m_header = new QToolButton(this);
+    m_header->setObjectName("SectionHeader");
+    m_header->setText(title);
+    m_header->setCheckable(true);
+    m_header->setChecked(expanded);
+    m_header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_header->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+    m_header->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_header->setAccessibleName(title);
+    m_content = new QWidget(this);
+    m_body = new QVBoxLayout(m_content);
+    m_body->setContentsMargins(4, 2, 2, 6);
+    m_body->setSpacing(6);
+    m_content->setVisible(expanded);
+    v->addWidget(m_header);
+    v->addWidget(m_content);
+    connect(m_header, &QToolButton::clicked, this, [this](bool on) {
+        setExpanded(on);
+        emit toggled(on);
+    });
+}
+
+void CollapsibleSection::setExpanded(bool on)
+{
+    m_header->setChecked(on);
+    m_header->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
+    m_content->setVisible(on);
+}
+
+bool CollapsibleSection::isExpanded() const
+{
+    return m_header->isChecked();
 }
 
 // ------------------------------------------------------------ RegionSelector
@@ -458,13 +737,15 @@ void CountdownOverlay::keyPressEvent(QKeyEvent* e)
 RecordingBar::RecordingBar(QWidget* parent)
     : QWidget(parent, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool)
 {
-    setAttribute(Qt::WA_TranslucentBackground);
+    // Deliberately NOT WA_TranslucentBackground: that makes a layered window, the kind
+    // most likely to slip past capture exclusion. Rounded corners come from a region.
+    setAttribute(Qt::WA_ShowWithoutActivating);
     auto* lay = new QHBoxLayout(this);
-    lay->setContentsMargins(14, 6, 8, 6);
-    lay->setSpacing(6);
+    lay->setContentsMargins(16, 5, 8, 5);
+    lay->setSpacing(4);
     m_time = new QLabel(QStringLiteral("00:00:00"), this);
     QFont f = m_time->font();
-    f.setPointSize(11);
+    f.setPointSize(10);
     f.setBold(true);
     m_time->setFont(f);
     m_time->setStyleSheet(QStringLiteral("color: white;"));
@@ -473,7 +754,7 @@ RecordingBar::RecordingBar(QWidget* parent)
     auto makeButton = [this, lay](IconId icon, const QString& tip) {
         auto* b = new QToolButton(this);
         b->setIcon(makeIcon(icon, Qt::white));
-        b->setIconSize(QSize(18, 18));
+        b->setIconSize(QSize(16, 16));
         b->setToolTip(tip);
         b->setAccessibleName(tip);
         b->setAutoRaise(true);
@@ -505,15 +786,22 @@ void RecordingBar::setMicMuted(bool muted, bool micEnabled)
     m_mic->setIcon(makeIcon(muted ? IconId::MicOff : IconId::Mic, Qt::white));
 }
 
+void RecordingBar::resizeEvent(QResizeEvent* e)
+{
+    QWidget::resizeEvent(e);
+    QPainterPath path;
+    path.addRoundedRect(QRectF(rect()), height() / 2.0, height() / 2.0);
+    setMask(QRegion(path.toFillPolygon().toPolygon()));
+}
+
 void RecordingBar::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
+    p.fillRect(rect(), QColor(20, 22, 28));
     p.setPen(Qt::NoPen);
-    p.setBrush(QColor(20, 22, 28, 235));
-    p.drawRoundedRect(rect(), height() / 2.0, height() / 2.0);
     p.setBrush(m_paused ? currentPalette().warning : currentPalette().record);
-    p.drawEllipse(QPointF(8, height() / 2.0), 3.5, 3.5);
+    p.drawEllipse(QPointF(9, height() / 2.0), 3.5, 3.5);
 }
 
 void RecordingBar::mousePressEvent(QMouseEvent* e)

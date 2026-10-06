@@ -1,5 +1,8 @@
 #pragma once
 
+#include "Icons.h"
+
+#include <QAbstractButton>
 #include <QElapsedTimer>
 #include <QFrame>
 #include <QImage>
@@ -13,6 +16,7 @@
 class QPushButton;
 class QToolButton;
 class QScreen;
+class QVBoxLayout;
 
 namespace luma::app {
 
@@ -23,7 +27,7 @@ public:
     explicit ToggleSwitch(QWidget* parent = nullptr);
     bool isChecked() const { return m_checked; }
     void setChecked(bool on);
-    QSize sizeHint() const override { return {38, 22}; }
+    QSize sizeHint() const override { return {36, 20}; }
 
 signals:
     void toggled(bool on);
@@ -37,7 +41,7 @@ private:
     bool m_checked = false;
 };
 
-// Small labelled value ("Frame rate  30 fps") used in the recording panel.
+// Small labelled value ("Frame rate  30 fps").
 class StatTile : public QWidget {
     Q_OBJECT
 public:
@@ -67,13 +71,15 @@ private:
     QTimer m_hide;
 };
 
-// Horizontal peak meter (dBFS scale, -60..0) with fast attack / slow decay.
+// Segmented peak meter (dBFS scale, -60..0) with fast attack / slow decay.
+// Cheap to paint: plain rectangles, no antialiasing or gradients.
 class LevelMeter : public QWidget {
     Q_OBJECT
 public:
     explicit LevelMeter(QWidget* parent = nullptr);
     void setLevel(float linearPeak);
-    QSize sizeHint() const override { return {140, 10}; }
+    void reset();
+    QSize sizeHint() const override { return {160, 8}; }
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -95,7 +101,7 @@ public:
     // Side-by-side "Before | After": left half original, right half processed.
     void setOriginal(const QImage& frame);
     void setCompare(bool on);
-    QSize sizeHint() const override { return {240, 135}; }
+    QSize sizeHint() const override { return {320, 180}; }
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -108,6 +114,94 @@ private:
     QString m_message;
     bool m_mirror = false;
     bool m_compare = false;
+};
+
+// Live preview of the composed recording frame (see PreviewController). The images
+// arrive at (about) the widget's pixel size, so painting is a plain blit.
+class PreviewView : public QWidget {
+    Q_OBJECT
+public:
+    explicit PreviewView(QWidget* parent = nullptr);
+    void setFrame(const QImage& frame);
+    void setMessage(const QString& text); // empty = show frames
+    void setInfo(const QString& text);    // chip in the top-right corner ("Display 1 | 1920×1080 | 30 FPS")
+    void setRecording(bool recording, bool paused);
+    void clearFrame();
+    QSize pixelSize() const;              // device pixels available for the image
+    QSize sizeHint() const override { return {640, 360}; }
+    QSize minimumSizeHint() const override { return {320, 180}; }
+
+signals:
+    void resized();
+
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void resizeEvent(QResizeEvent*) override;
+
+private:
+    QImage m_frame;
+    QString m_message;
+    QString m_info;
+    bool m_recording = false;
+    bool m_paused = false;
+};
+
+// One entry of the capture mode list: icon, title and a short description.
+class ModeButton : public QAbstractButton {
+    Q_OBJECT
+public:
+    ModeButton(IconId icon, const QString& title, const QString& subtitle, QWidget* parent = nullptr);
+    QSize sizeHint() const override;
+
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void enterEvent(QEnterEvent*) override;
+    void leaveEvent(QEvent*) override;
+
+private:
+    IconId m_icon;
+    QString m_title;
+    QString m_subtitle;
+};
+
+// Round transport button (Record / Pause / Stop / Screenshot) with a caption below.
+class TransportButton : public QAbstractButton {
+    Q_OBJECT
+public:
+    TransportButton(const QString& caption, int diameter, QWidget* parent = nullptr);
+    void setVisual(IconId icon, const QColor& fill, const QColor& iconColor);
+    void setCaption(const QString& caption);
+    QSize sizeHint() const override;
+
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void enterEvent(QEnterEvent*) override;
+    void leaveEvent(QEvent*) override;
+
+private:
+    IconId m_icon = IconId::Record;
+    QColor m_fill;
+    QColor m_iconColor;
+    int m_diameter;
+    QString m_caption;
+};
+
+// Titled section whose body can be collapsed (keeps long panels scannable).
+class CollapsibleSection : public QWidget {
+    Q_OBJECT
+public:
+    CollapsibleSection(const QString& title, QWidget* parent = nullptr, bool expanded = true);
+    QVBoxLayout* body() const { return m_body; }
+    void setExpanded(bool on);
+    bool isExpanded() const;
+
+signals:
+    void toggled(bool expanded); // by the user (header click)
+
+private:
+    QToolButton* m_header;
+    QWidget* m_content;
+    QVBoxLayout* m_body;
 };
 
 // Full-screen overlay on one monitor for dragging out a capture region.
@@ -141,7 +235,7 @@ private:
     bool m_hasSelection = false;
 };
 
-// Big translucent countdown in the middle of a screen; Esc cancels.
+// Big countdown in the middle of a screen; Esc cancels.
 class CountdownOverlay : public QWidget {
     Q_OBJECT
 public:
@@ -160,7 +254,9 @@ private:
     QTimer m_timer;
 };
 
-// Small always-on-top control bar shown while recording (excluded from capture).
+// Optional recording HUD (off by default): a small always-on-top control bar.
+// It is an ordinary opaque window (rounded via a window region, NOT a layered/
+// translucent window) and is excluded from capture before it is first shown.
 class RecordingBar : public QWidget {
     Q_OBJECT
 public:
@@ -175,6 +271,7 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent*) override;
+    void resizeEvent(QResizeEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
 

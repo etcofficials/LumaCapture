@@ -5,6 +5,7 @@
 #include <QProcess>
 
 #include <windows.h>
+#include <dwmapi.h>
 
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
@@ -12,15 +13,31 @@
 
 namespace luma::app {
 
-void setExcludedFromCapture(QWidget* window, bool excluded)
+bool setExcludedFromCapture(QWidget* window, bool excluded)
+{
+    if (!window)
+        return false;
+    const auto hwnd = reinterpret_cast<HWND>(window->winId()); // creates the native window if needed
+    if (!excluded) {
+        SetWindowDisplayAffinity(hwnd, WDA_NONE);
+        return true;
+    }
+    if (SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
+        return true;
+    // Windows 10 before 2004 has no WDA_EXCLUDEFROMCAPTURE. WDA_MONITOR would show a
+    // black rectangle in recordings instead, which is no better - leave it unset.
+    return false;
+}
+
+void setDarkTitleBar(QWidget* window, bool dark)
 {
     if (!window)
         return;
     const auto hwnd = reinterpret_cast<HWND>(window->winId());
-    if (!SetWindowDisplayAffinity(hwnd, excluded ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE) && excluded) {
-        // Older Windows 10 builds: fall back to WDA_MONITOR (window shows black in captures).
-        SetWindowDisplayAffinity(hwnd, WDA_MONITOR);
-    }
+    const BOOL value = dark ? TRUE : FALSE;
+    // DWMWA_USE_IMMERSIVE_DARK_MODE is 20 on Windows 10 2004+ and 19 on 1809-1909.
+    if (FAILED(DwmSetWindowAttribute(hwnd, 20, &value, sizeof(value))))
+        DwmSetWindowAttribute(hwnd, 19, &value, sizeof(value));
 }
 
 int64_t freeDiskBytes(const QString& path)
@@ -73,6 +90,12 @@ void showInExplorer(const QString& file)
 {
     QProcess::startDetached(QStringLiteral("explorer.exe"),
                             {QStringLiteral("/select,"), QDir::toNativeSeparators(file)});
+}
+
+void openWithDialog(const QString& file)
+{
+    QProcess::startDetached(QStringLiteral("rundll32.exe"),
+                            {QStringLiteral("shell32.dll,OpenAs_RunDLL"), QDir::toNativeSeparators(file)});
 }
 
 } // namespace luma::app

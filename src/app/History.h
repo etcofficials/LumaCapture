@@ -10,23 +10,29 @@ struct RecordingEntry {
     QString path;
     QDateTime created;
     double durationSeconds = 0;
-    int width = 0, height = 0, fps = 0;
+    int width = 0, height = 0;
+    double fps = 0;
     qint64 sizeBytes = 0;
-    bool exists = true; // refreshed in the background
+    bool imported = false; // added with Import / drag & drop (not recorded by LumaCapture)
+    bool exists = true;    // refreshed in the background
 };
 
-// Recording history stored as JSON next to the settings (newest first, max 300).
+// Library contents stored as JSON in the data folder (newest first, max 500).
+// Saving happens on the disk worker thread with a snapshot; the UI never waits.
 class History {
 public:
     explicit History(QString file);
-    void load();
-    void save() const;
+    void load(); // startup only
     void add(const RecordingEntry& e);
     void remove(const QString& path);
+    bool rename(const QString& oldPath, const QString& newPath);
+    bool contains(const QString& path) const;
     const QList<RecordingEntry>& entries() const { return m_entries; }
-    void setEntries(QList<RecordingEntry> e) { m_entries = std::move(e); }
+    void setEntries(QList<RecordingEntry> e);
 
 private:
+    void save() const;
+
     QString m_file;
     QList<RecordingEntry> m_entries;
 };

@@ -16,6 +16,7 @@ extern "C" {
 #include <libavutil/dict.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/mem.h>
+#include <libavutil/pixdesc.h>
 }
 
 namespace luma::mux {
@@ -424,6 +425,59 @@ bool probeMedia(const std::filesystem::path& file, MediaInfo& info)
     }
     avformat_close_input(&ctx);
     return ok;
+}
+
+bool probeDetails(const std::filesystem::path& file, MediaDetails& d, std::string* error)
+{
+    const std::string in = utf8Path(file);
+    AVFormatContext* ctx = nullptr;
+    int ret = avformat_open_input(&ctx, in.c_str(), nullptr, nullptr);
+    if (ret < 0) {
+        if (error)
+            *error = ff::errorString(ret);
+        return false;
+    }
+    ret = avformat_find_stream_info(ctx, nullptr);
+    if (ret < 0) {
+        if (error)
+            *error = ff::errorString(ret);
+        avformat_close_input(&ctx);
+        return false;
+    }
+    auto str = [](const char* s) { return std::string(s ? s : "?"); };
+    d = {};
+    d.container = str(ctx->iformat ? ctx->iformat->long_name : nullptr);
+    d.durationSeconds = ctx->duration > 0 ? static_cast<double>(ctx->duration) / AV_TIME_BASE : 0;
+    d.bitRate = ctx->bit_rate;
+    for (unsigned i = 0; i < ctx->nb_streams; ++i) {
+        const AVStream* s = ctx->streams[i];
+        const AVCodecParameters* p = s->codecpar;
+        if (p->codec_type == AVMEDIA_TYPE_VIDEO) {
+            MediaDetails::Video v;
+            v.codec = str(avcodec_get_name(p->codec_id));
+            v.profile = str(avcodec_profile_name(p->codec_id, p->profile));
+            v.pixelFormat = str(av_get_pix_fmt_name(static_cast<AVPixelFormat>(p->format)));
+            v.colorRange = str(av_color_range_name(p->color_range));
+            v.colorSpace = str(av_color_space_name(p->color_space));
+            v.width = p->width;
+            v.height = p->height;
+            v.avgFps = s->avg_frame_rate.den ? av_q2d(s->avg_frame_rate) : 0;
+            v.baseFps = s->r_frame_rate.den ? av_q2d(s->r_frame_rate) : 0;
+            v.frames = s->nb_frames;
+            d.video.push_back(v);
+        } else if (p->codec_type == AVMEDIA_TYPE_AUDIO) {
+            MediaDetails::Audio a;
+            a.codec = str(avcodec_get_name(p->codec_id));
+            a.sampleRate = p->sample_rate;
+            a.channels = p->ch_layout.nb_channels;
+            a.bitRate = p->bit_rate;
+            const AVDictionaryEntry* t = av_dict_get(s->metadata, "title", nullptr, 0);
+            a.title = t ? t->value : "";
+            d.audio.push_back(a);
+        }
+    }
+    avformat_close_input(&ctx);
+    return true;
 }
 
 } // namespace luma::mux

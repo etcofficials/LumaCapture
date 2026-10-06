@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(LumaCapture
-    VERSION 1.0.0
+    VERSION 2.0.0
     DESCRIPTION "Lightweight screen recorder for low-end Windows PCs"
     LANGUAGES CXX RC)
 

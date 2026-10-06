@@ -1,5 +1,7 @@
 #include "History.h"
 
+#include "DiskWorker.h"
+
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -25,8 +27,9 @@ void History::load()
         e.durationSeconds = o.value("duration").toDouble();
         e.width = o.value("width").toInt();
         e.height = o.value("height").toInt();
-        e.fps = o.value("fps").toInt();
+        e.fps = o.value("fps").toDouble();
         e.sizeBytes = static_cast<qint64>(o.value("size").toDouble());
+        e.imported = o.value("imported").toBool();
         if (!e.path.isEmpty())
             m_entries.append(e);
     }
@@ -44,20 +47,28 @@ void History::save() const
         o["height"] = e.height;
         o["fps"] = e.fps;
         o["size"] = static_cast<double>(e.sizeBytes);
+        if (e.imported)
+            o["imported"] = true;
         arr.append(o);
     }
-    QSaveFile f(m_file); // atomic replace: a crash never leaves a half-written history
-    if (f.open(QIODevice::WriteOnly)) {
-        f.write(QJsonDocument(arr).toJson());
-        f.commit();
-    }
+    const QByteArray json = QJsonDocument(arr).toJson();
+    const QString file = m_file;
+    diskworker::post(QStringLiteral("history"), [json, file] {
+        QSaveFile f(file); // atomic replace: a crash never leaves a half-written history
+        if (f.open(QIODevice::WriteOnly)) {
+            f.write(json);
+            f.commit();
+        }
+    });
 }
 
 void History::add(const RecordingEntry& e)
 {
-    remove(e.path);
+    for (int i = m_entries.size() - 1; i >= 0; --i)
+        if (m_entries[i].path.compare(e.path, Qt::CaseInsensitive) == 0)
+            m_entries.removeAt(i);
     m_entries.prepend(e);
-    while (m_entries.size() > 300)
+    while (m_entries.size() > 500)
         m_entries.removeLast();
     save();
 }
@@ -68,6 +79,33 @@ void History::remove(const QString& path)
         if (m_entries[i].path.compare(path, Qt::CaseInsensitive) == 0)
             m_entries.removeAt(i);
     save();
+}
+
+bool History::rename(const QString& oldPath, const QString& newPath)
+{
+    bool found = false;
+    for (RecordingEntry& e : m_entries) {
+        if (e.path.compare(oldPath, Qt::CaseInsensitive) == 0) {
+            e.path = newPath;
+            found = true;
+        }
+    }
+    if (found)
+        save();
+    return found;
+}
+
+bool History::contains(const QString& path) const
+{
+    for (const RecordingEntry& e : m_entries)
+        if (e.path.compare(path, Qt::CaseInsensitive) == 0)
+            return true;
+    return false;
+}
+
+void History::setEntries(QList<RecordingEntry> e)
+{
+    m_entries = std::move(e); // only the "exists" flags change; nothing to save
 }
 
 } // namespace luma::app

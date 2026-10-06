@@ -65,4 +65,25 @@ struct MediaInfo {
 };
 bool probeMedia(const std::filesystem::path& file, MediaInfo& info);
 
+// Everything a user may want to verify about a recording (Library > Details).
+struct MediaDetails {
+    std::string container;
+    double durationSeconds = 0;
+    int64_t bitRate = 0; // bits per second, whole file
+    struct Video {
+        std::string codec, profile, pixelFormat, colorRange, colorSpace;
+        int width = 0, height = 0;
+        double avgFps = 0, baseFps = 0;
+        int64_t frames = 0; // from the container (0 = unknown)
+    };
+    struct Audio {
+        std::string codec, title;
+        int sampleRate = 0, channels = 0;
+        int64_t bitRate = 0;
+    };
+    std::vector<Video> video;
+    std::vector<Audio> audio;
+};
+bool probeDetails(const std::filesystem::path& file, MediaDetails& details, std::string* error = nullptr);
+
 } // namespace luma::mux

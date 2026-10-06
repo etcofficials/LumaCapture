@@ -11,30 +11,29 @@
 #include <QSystemTrayIcon>
 #include <QTimer>
 
+#include <memory>
+
 class QButtonGroup;
-class QCheckBox;
-class QComboBox;
 class QLabel;
-class QListWidget;
-class QPushButton;
-class QSlider;
-class QSpinBox;
 class QStackedWidget;
-class QToolButton;
 
 namespace luma::app {
 
+class AboutPage;
 class AudioMonitor;
 class Banner;
 class HotkeyManager;
 class LayoutDialog;
-class LevelMeter;
+class LibraryPage;
+class MediaImporter;
+class PreviewController;
+class RecordPage;
 class RecordingBar;
-class SettingsDialog;
-class StatTile;
-class ToggleSwitch;
+class SettingsPage;
+class SettingsStore;
+class ThumbnailCache;
 class WebcamController;
-class WebcamPreview;
+struct DiagnosticsState;
 
 struct AutomationOptions {
     int selfTestSeconds = 0;  // > 0: record, pause, resume, stop, exercise the camera, then quit
@@ -42,138 +41,97 @@ struct AutomationOptions {
     QString outputDir;        // overrides the recording folder for the self-test (not saved)
 };
 
+// Top-level window: navigation (Record / Library / Settings / About), the shared
+// notification banner and status bar, and the orchestration of recording
+// (preflight, live preview hand-over, countdown, capture exclusion, HUD, tray,
+// hotkeys). All heavy work lives in the controllers and runs off the UI thread.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(const AutomationOptions& automation = {}, QWidget* parent = nullptr);
     ~MainWindow() override;
 
+    // Registered window message a second instance broadcasts to bring this window up.
+    static unsigned activateMessageId();
+
 protected:
     void closeEvent(QCloseEvent* e) override;
     void changeEvent(QEvent* e) override;
     void showEvent(QShowEvent* e) override;
+    void dragEnterEvent(QDragEnterEvent* e) override;
+    void dropEvent(QDropEvent* e) override;
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
 
 private:
-    QWidget* buildSourceCard();
-    QWidget* buildVideoCard();
-    QWidget* buildAudioCard();
-    QWidget* buildWebcamCard();
-    QWidget* buildStudioPanel();
-    QWidget* buildRecentPanel();
-    void buildTray();
+    enum Page { RecordPg = 0, LibraryPg, SettingsPg, AboutPg };
 
-    void settingsChanged(bool live = true);
-    void applySettings(const AppSettings& s); // from the settings dialog
-    void syncWidgetsFromSettings();
-    void updateSummary();
-    void updateRecordingUi();
-    void updateWarnings();
-    void updateFooter();
-    void refreshRecent();
+    QWidget* buildTopBar();
+    void buildTray();
+    void showPage(Page p);
+    void onSettingsChanged(unsigned scope);
+    void applyWebcam();
     void registerHotkeys(bool showConflicts);
-    void applyCaptureExclusion(QWidget* w);
-    void saveSettingsNow();
+    void updatePreviewVisibility();
+    bool exclude(QWidget* w);
+    void updateFooter();
+    void bringToFront();
 
     void onRecordClicked();
     void startWithPreflight();
+    void continueStart();
+    void beginRecording();
     void onStateChanged(session::RecState s);
     void onStatusTick();
     void onHotkey(HotkeyAction a);
-    void openSettings(int page);
-    void openLayout();
-    void selectRegion();
-    void fillMonitors();
-    void fillWindows(const QList<WindowEntry>& windows);
-    void showError(const QString& title, const QString& message);
+    void selectRegion(double aspect);
+    void openLayoutEditor();
+    void setTestLevels(bool on);
+    void sampleDiagnostics();
     void notify(int kind, const QString& text, int autoHideMs = 6000);
+    void showError(const QString& title, const QString& message);
 
     void runSelfTest();
     void runSnapshots();
 
     AutomationOptions m_automation;
-    AppSettings m_settings;
+    SettingsStore* m_store = nullptr;
     History m_history;
     DeviceScanner* m_scanner = nullptr;
     WebcamController* m_webcam = nullptr;
     RecordingController* m_controller = nullptr;
+    PreviewController* m_preview = nullptr;
     HotkeyManager* m_hotkeys = nullptr;
     AudioMonitor* m_audioTest = nullptr;
-    RecordingBar* m_bar = nullptr;
+    ThumbnailCache* m_thumbs = nullptr;
+    MediaImporter* m_importer = nullptr;
+    RecordingBar* m_hud = nullptr;
     QSystemTrayIcon* m_tray = nullptr;
     QAction* m_trayRecord = nullptr;
-    QPointer<SettingsDialog> m_settingsDialog;
     QPointer<LayoutDialog> m_layoutDialog;
-    QTimer m_saveTimer;
-    QTimer m_liveTimer;
-    QTimer m_heartbeat;
-    QTimer m_finishTicker;
-    bool m_quitAfterStop = false;
-    bool m_loadingUi = false;
-    bool m_hotkeysRegistered = false;
-    QString m_savedHint;
+    std::shared_ptr<DiagnosticsState> m_diag;
 
-    // Source
-    QButtonGroup* m_sourceGroup = nullptr;
-    QStackedWidget* m_sourceStack = nullptr;
-    QComboBox* m_display = nullptr;
-    QComboBox* m_window = nullptr;
-    QLabel* m_regionLabel = nullptr;
-    QComboBox* m_regionAspect = nullptr;
-    QSpinBox* m_regionX = nullptr;
-    QSpinBox* m_regionY = nullptr;
-    QSpinBox* m_regionW = nullptr;
-    QSpinBox* m_regionH = nullptr;
-    QCheckBox* m_cursor = nullptr;
-    QWidget* m_sourceCard = nullptr;
-    QLabel* m_sourceWarning = nullptr;
-    // Video
-    QComboBox* m_resolution = nullptr;
-    QComboBox* m_fps = nullptr;
-    QComboBox* m_quality = nullptr;
-    QComboBox* m_speed = nullptr;
-    QLabel* m_videoWarning = nullptr;
-    QWidget* m_videoCard = nullptr;
-    // Audio
-    ToggleSwitch* m_systemAudio = nullptr;
-    ToggleSwitch* m_mic = nullptr;
-    QLabel* m_systemName = nullptr;
-    QLabel* m_micName = nullptr;
-    QSlider* m_systemVolume = nullptr;
-    QSlider* m_micVolume = nullptr;
-    LevelMeter* m_systemMeter = nullptr;
-    LevelMeter* m_micMeter = nullptr;
-    QToolButton* m_micMute = nullptr;
-    QPushButton* m_audioTestButton = nullptr;
-    // Webcam
-    ToggleSwitch* m_webcamOn = nullptr;
-    QLabel* m_webcamName = nullptr;
-    QLabel* m_webcamState = nullptr;
-    WebcamPreview* m_webcamPreview = nullptr;
-    // Studio
-    QLabel* m_pill = nullptr;
-    QLabel* m_timer = nullptr;
-    QLabel* m_stateText = nullptr;
-    StatTile* m_tileOutput = nullptr;
-    StatTile* m_tileFps = nullptr;
-    StatTile* m_tileDropped = nullptr;
-    StatTile* m_tileSize = nullptr;
-    QPushButton* m_record = nullptr;
-    QPushButton* m_pause = nullptr;
-    QPushButton* m_screenshot = nullptr;
-    QLabel* m_summary = nullptr;
+    QButtonGroup* m_nav = nullptr;
+    QLabel* m_topState = nullptr;
     Banner* m_banner = nullptr;
-    QComboBox* m_profile = nullptr;
+    QStackedWidget* m_pages = nullptr;
+    RecordPage* m_recordPage = nullptr;
+    LibraryPage* m_libraryPage = nullptr;
+    SettingsPage* m_settingsPage = nullptr;
+    AboutPage* m_aboutPage = nullptr;
     QLabel* m_footerPath = nullptr;
     QLabel* m_footerFree = nullptr;
-    // Recent
-    QListWidget* m_recent = nullptr;
-    QPushButton* m_openBtn = nullptr;
-    QPushButton* m_showBtn = nullptr;
-    QPushButton* m_deleteBtn = nullptr;
 
-    int64_t m_lastFrames = 0;
-    QElapsedTimer m_fpsClock;
-    double m_measuredFps = 0;
+    QTimer m_liveTimer;    // debounced live updates to a running recording
+    QTimer m_meterTimer;   // ~25 Hz audio meters while recording
+    QTimer m_heartbeat;    // UI hang watchdog
+    QTimer m_finishTicker; // "saving (n s)" text
+    QTimer m_diagTimer;    // 1 Hz diagnostics (only when the panel is on)
+    QString m_savedHint;
+    bool m_quitAfterStop = false;
+    bool m_hotkeysRegistered = false;
+    bool m_excludeOk = true;          // Windows accepted WDA_EXCLUDEFROMCAPTURE for the main window
+    bool m_restoreAfterRecording = false;
+    bool m_diagBusy = false;
 };
 
 } // namespace luma::app

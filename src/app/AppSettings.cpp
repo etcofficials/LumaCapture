@@ -5,6 +5,9 @@
 #include <QSettings>
 #include <QStandardPaths>
 
+#include <algorithm>
+#include <cmath>
+
 namespace luma::app {
 namespace {
 
@@ -46,18 +49,12 @@ QString hotkeyKey(HotkeyAction a)
     }
 }
 
-} // namespace
-
-int AppSettings::crfForQuality() const
+bool isSupportedFps(int fps)
 {
-    switch (quality) {
-    case QualityPreset::SmallFile:   return 28;
-    case QualityPreset::Balanced:    return 23;
-    case QualityPreset::HighQuality: return 19;
-    case QualityPreset::Custom:      return std::clamp(crf, 0, 51);
-    }
-    return 23;
+    return std::find(std::begin(kFrameRates), std::end(kFrameRates), fps) != std::end(kFrameRates);
 }
+
+} // namespace
 
 QString AppSettings::hotkeyName(HotkeyAction a)
 {
@@ -71,36 +68,206 @@ QString AppSettings::hotkeyName(HotkeyAction a)
     }
 }
 
+// ------------------------------------------------------------- encoder choice
+
+QString EncoderChoice::description() const
+{
+    return QStringLiteral("H.264 (x264 %1, CRF %2)").arg(preset).arg(crf);
+}
+
+EncoderChoice resolveEncoder(const AppSettings& s)
+{
+    EncoderChoice e;
+    const QString p = s.x264Preset.trimmed().toLower();
+    e.preset = (p.isEmpty() || p == QLatin1String("auto")) ? QStringLiteral("ultrafast") : p;
+    switch (s.quality) {
+    case QualityPreset::Low:      e.crf = 26; break;
+    case QualityPreset::Balanced: e.crf = 21; break;
+    case QualityPreset::High:     e.crf = 18; break;
+    case QualityPreset::VeryHigh: e.crf = 16; break;
+    case QualityPreset::Custom:   e.crf = std::clamp(s.crf, 0, 51); break;
+    }
+    // x264's "ultrafast" switches the deblocking filter off, which shows as block
+    // edges in moving content. Turning it back on costs ~5 % CPU (measured).
+    if (e.preset == QLatin1String("ultrafast"))
+        e.x264Params = QStringLiteral("deblock=0,0");
+    return e;
+}
+
+QString PerfEstimate::label() const
+{
+    switch (level) {
+    case PerfLevel::Light:     return QStringLiteral("Light");
+    case PerfLevel::Moderate:  return QStringLiteral("Moderate");
+    case PerfLevel::Heavy:     return QStringLiteral("Heavy");
+    case PerfLevel::VeryHeavy: return QStringLiteral("Very heavy");
+    }
+    return {};
+}
+
+QString PerfEstimate::advice() const
+{
+    switch (level) {
+    case PerfLevel::Heavy:
+        return QStringLiteral("May drop frames when the CPU is busy or hot. 720p or a lower frame rate is safer.");
+    case PerfLevel::VeryHeavy:
+        return QStringLiteral("Likely to drop frames: video is encoded on the CPU. 1080p30 or 720p60 are "
+                              "recommended on a quad-core PC like this one.");
+    default:
+        return {};
+    }
+}
+
+PerfEstimate estimatePerformance(QSize output, int fps, const EncoderChoice& enc)
+{
+    PerfEstimate p;
+    if (!output.isValid() || output.isEmpty() || fps <= 0)
+        return p;
+    const double pixelRate = static_cast<double>(output.width()) * output.height() * fps / (1920.0 * 1080.0 * 30.0);
+    // Measured CPU seconds per frame relative to ultrafast (natural motion, 3 threads).
+    double presetCost = 2.5;
+    if (enc.preset == QLatin1String("ultrafast"))
+        presetCost = 1.0;
+    else if (enc.preset == QLatin1String("superfast"))
+        presetCost = 1.45;
+    else if (enc.preset == QLatin1String("veryfast"))
+        presetCost = 1.8;
+    const double crfCost = enc.crf <= 16 ? 1.1 : (enc.crf <= 18 ? 1.06 : 1.0);
+    p.load = pixelRate * presetCost * crfCost;
+    if (p.load <= 0.6)
+        p.level = PerfLevel::Light;
+    else if (p.load <= 1.12)
+        p.level = PerfLevel::Moderate;
+    else if (p.load <= 1.6)
+        p.level = PerfLevel::Heavy;
+    else
+        p.level = PerfLevel::VeryHeavy;
+    return p;
+}
+
+QString qualityName(QualityPreset q)
+{
+    switch (q) {
+    case QualityPreset::Low:      return QStringLiteral("Low");
+    case QualityPreset::Balanced: return QStringLiteral("Balanced");
+    case QualityPreset::High:     return QStringLiteral("High");
+    case QualityPreset::VeryHigh: return QStringLiteral("Very High");
+    case QualityPreset::Custom:   return QStringLiteral("Custom");
+    }
+    return {};
+}
+
+QString resolutionName(ResolutionPreset r)
+{
+    switch (r) {
+    case ResolutionPreset::Native: return QStringLiteral("Source size");
+    case ResolutionPreset::P1080:  return QStringLiteral("1920 × 1080");
+    case ResolutionPreset::P900:   return QStringLiteral("1600 × 900");
+    case ResolutionPreset::P720:   return QStringLiteral("1280 × 720");
+    case ResolutionPreset::P480:   return QStringLiteral("854 × 480");
+    }
+    return {};
+}
+
+QString sourceKindName(SourceKind k)
+{
+    switch (k) {
+    case SourceKind::Display: return QStringLiteral("Display");
+    case SourceKind::Window:  return QStringLiteral("Window");
+    case SourceKind::Region:  return QStringLiteral("Region");
+    case SourceKind::Game:    return QStringLiteral("Game");
+    }
+    return {};
+}
+
+int presetHeight(ResolutionPreset p)
+{
+    switch (p) {
+    case ResolutionPreset::P1080: return 1080;
+    case ResolutionPreset::P900:  return 900;
+    case ResolutionPreset::P720:  return 720;
+    case ResolutionPreset::P480:  return 480;
+    default:                      return 0;
+    }
+}
+
+QSize scaledOutputSize(QSize source, ResolutionPreset preset)
+{
+    if (!source.isValid() || source.isEmpty())
+        return {};
+    int w = source.width(), h = source.height();
+    const int target = presetHeight(preset);
+    if (target > 0 && target < h) { // never upscale; keep the source aspect ratio
+        w = static_cast<int>(std::lround(static_cast<double>(w) * target / h));
+        h = target;
+    }
+    return QSize(std::max(16, w & ~1), std::max(16, h & ~1));
+}
+
+// ------------------------------------------------------------------ persist
+
+namespace {
+
+// Default for a fresh install: the user's Videos folder (saved settings keep any chosen folder).
+QString defaultVideoRoot()
+{
+    const QString movies = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    return movies.isEmpty() ? QCoreApplication::applicationDirPath() + QStringLiteral("/Recordings")
+                            : movies + QStringLiteral("/LumaCapture");
+}
+
+} // namespace
+
+AppSettings defaultSettings()
+{
+    AppSettings s;
+    s.outputDir = defaultVideoRoot();
+    s.screenshotDir = s.outputDir + QStringLiteral("/Screenshots");
+    s.region = QRect(100, 100, 1280, 720);
+    for (int i = 0; i < static_cast<int>(HotkeyAction::Count); ++i)
+        s.hotkeys[i] = QKeySequence(defaultHotkey(static_cast<HotkeyAction>(i)), QKeySequence::PortableText);
+    return s;
+}
+
 AppSettings loadSettings(const QString& iniPath)
 {
     AppSettings s;
     QSettings q(iniPath, QSettings::IniFormat);
-    // Default for a fresh install: the user's Videos folder (saved settings keep any chosen folder).
-    QString videoRoot = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
-    videoRoot = videoRoot.isEmpty() ? QCoreApplication::applicationDirPath() + QStringLiteral("/Recordings")
-                                    : videoRoot + QStringLiteral("/LumaCapture");
+    const QString videoRoot = defaultVideoRoot();
 
     q.beginGroup("general");
     s.outputDir = q.value("outputDir", videoRoot).toString();
-    s.screenshotDir = q.value("screenshotDir", videoRoot + "/Screenshots").toString();
+    s.screenshotDir = q.value("screenshotDir", s.outputDir + "/Screenshots").toString();
     s.namePattern = q.value("namePattern", s.namePattern).toString();
-    s.container = static_cast<Container>(q.value("container", 0).toInt());
+    s.container = static_cast<Container>(std::clamp(q.value("container", 0).toInt(), 0, 1));
     s.keepMkvAfterMp4 = q.value("keepMkvAfterMp4", s.keepMkvAfterMp4).toBool();
-    s.theme = static_cast<Theme>(q.value("theme", 0).toInt());
-    s.countdownSeconds = q.value("countdown", 0).toInt();
+    s.theme = static_cast<Theme>(std::clamp(q.value("theme", 0).toInt(), 0, 1));
+    s.countdownSeconds = std::clamp(q.value("countdown", 0).toInt(), 0, 10);
     s.minimizeOnRecord = q.value("minimizeOnRecord", false).toBool();
-    s.showRecordingBar = q.value("showRecordingBar", true).toBool();
+    // v2: the recording HUD is opt-in (v1's "showRecordingBar" defaulted to on and is ignored).
+    s.recordingHud = q.value("hud", false).toBool();
     s.minimizeToTray = q.value("minimizeToTray", false).toBool();
     s.excludeOwnWindows = q.value("excludeOwnWindows", true).toBool();
     s.lowSpaceWarnMB = q.value("lowSpaceWarnMB", 2000).toInt();
     s.profile = q.value("profile", s.profile).toString();
     s.screenshotCursor = q.value("screenshotCursor", true).toBool();
+    s.checkRecoveryOnStart = q.value("checkRecovery", true).toBool();
+    s.warnFallingBehind = q.value("warnFallingBehind", true).toBool();
+    s.livePreview = q.value("livePreview", true).toBool();
+    s.previewFps = std::clamp(q.value("previewFps", 10).toInt(), 2, 15);
+    s.previewWhileRecording = q.value("previewWhileRecording", true).toBool();
+    s.diagnostics = q.value("diagnostics", false).toBool();
+    s.contextTab = std::clamp(q.value("contextTab", 0).toInt(), 0, 4);
+    s.advancedVideo = q.value("advancedVideo", false).toBool();
+    s.librarySort = static_cast<LibrarySort>(std::clamp(q.value("librarySort", 0).toInt(), 0, 3));
+    s.libraryCopyOnImport = q.value("libraryCopyOnImport", false).toBool();
     q.endGroup();
 
     q.beginGroup("source");
-    s.sourceKind = static_cast<SourceKind>(std::clamp(q.value("kind", 0).toInt(), 0, 2));
+    s.sourceKind = static_cast<SourceKind>(std::clamp(q.value("kind", 0).toInt(), 0, 3));
     s.displayName = q.value("display").toString();
     s.windowTitle = q.value("windowTitle").toString();
+    s.gameTitle = q.value("gameTitle").toString();
     s.region = q.value("region", QRect(100, 100, 1280, 720)).toRect();
     s.captureCursor = q.value("captureCursor", true).toBool();
     s.cropLeft = q.value("cropLeft", 0).toInt();
@@ -119,13 +286,25 @@ AppSettings loadSettings(const QString& iniPath)
     q.beginGroup("video");
     s.resolution = static_cast<ResolutionPreset>(std::clamp(q.value("resolution", 0).toInt(), 0, 4));
     s.fps = q.value("fps", 30).toInt();
-    if (s.fps != 24 && s.fps != 30 && s.fps != 60)
+    if (!isSupportedFps(s.fps))
         s.fps = 30;
-    s.quality = static_cast<QualityPreset>(std::clamp(q.value("quality", 1).toInt(), 0, 3));
-    s.crf = q.value("crf", 23).toInt();
-    s.x264Preset = q.value("x264Preset", s.x264Preset).toString();
-    s.keyframeSeconds = q.value("keyframeSeconds", 2.0).toDouble();
-    s.encoderThreads = q.value("threads", 3).toInt();
+    if (q.contains("quality2")) {
+        s.quality = static_cast<QualityPreset>(std::clamp(q.value("quality2", 1).toInt(), 0, 4));
+    } else {
+        // v1: 0 small file, 1 balanced, 2 high quality, 3 custom.
+        static const QualityPreset v1[] = {QualityPreset::Low, QualityPreset::Balanced, QualityPreset::High,
+                                           QualityPreset::Custom};
+        s.quality = v1[std::clamp(q.value("quality", 1).toInt(), 0, 3)];
+    }
+    s.crf = std::clamp(q.value("crf", 21).toInt(), 0, 51);
+    if (q.contains("x264Preset2")) {
+        s.x264Preset = q.value("x264Preset2", s.x264Preset).toString();
+    } else {
+        const QString v1 = q.value("x264Preset", QStringLiteral("ultrafast")).toString();
+        s.x264Preset = v1 == QLatin1String("ultrafast") ? QStringLiteral("auto") : v1;
+    }
+    s.keyframeSeconds = std::clamp(q.value("keyframeSeconds", 2.0).toDouble(), 0.5, 10.0);
+    s.encoderThreads = std::clamp(q.value("threads", 3).toInt(), 1, 8);
     s.cpuConvert = q.value("cpuConvert", false).toBool();
     s.queueCapacity = std::clamp(q.value("queue", 8).toInt(), 2, 64);
     auto& f = s.videoFilters;
@@ -267,6 +446,8 @@ AppSettings loadSettings(const QString& iniPath)
     return s;
 }
 
+// Called on the settings writer thread with a snapshot (never on the UI thread):
+// QSettings uses a lock file and flushes to disk, which can take seconds on a slow HDD.
 void saveSettings(const AppSettings& s, const QString& iniPath)
 {
     QSettings q(iniPath, QSettings::IniFormat);
@@ -281,18 +462,29 @@ void saveSettings(const AppSettings& s, const QString& iniPath)
     q.setValue("theme", static_cast<int>(s.theme));
     q.setValue("countdown", s.countdownSeconds);
     q.setValue("minimizeOnRecord", s.minimizeOnRecord);
-    q.setValue("showRecordingBar", s.showRecordingBar);
+    q.setValue("hud", s.recordingHud);
     q.setValue("minimizeToTray", s.minimizeToTray);
     q.setValue("excludeOwnWindows", s.excludeOwnWindows);
     q.setValue("lowSpaceWarnMB", s.lowSpaceWarnMB);
     q.setValue("profile", s.profile);
     q.setValue("screenshotCursor", s.screenshotCursor);
+    q.setValue("checkRecovery", s.checkRecoveryOnStart);
+    q.setValue("warnFallingBehind", s.warnFallingBehind);
+    q.setValue("livePreview", s.livePreview);
+    q.setValue("previewFps", s.previewFps);
+    q.setValue("previewWhileRecording", s.previewWhileRecording);
+    q.setValue("diagnostics", s.diagnostics);
+    q.setValue("contextTab", s.contextTab);
+    q.setValue("advancedVideo", s.advancedVideo);
+    q.setValue("librarySort", static_cast<int>(s.librarySort));
+    q.setValue("libraryCopyOnImport", s.libraryCopyOnImport);
     q.endGroup();
 
     q.beginGroup("source");
     q.setValue("kind", static_cast<int>(s.sourceKind));
     q.setValue("display", s.displayName);
     q.setValue("windowTitle", s.windowTitle);
+    q.setValue("gameTitle", s.gameTitle);
     q.setValue("region", s.region);
     q.setValue("captureCursor", s.captureCursor);
     q.setValue("cropLeft", s.cropLeft);
@@ -311,9 +503,9 @@ void saveSettings(const AppSettings& s, const QString& iniPath)
     q.beginGroup("video");
     q.setValue("resolution", static_cast<int>(s.resolution));
     q.setValue("fps", s.fps);
-    q.setValue("quality", static_cast<int>(s.quality));
+    q.setValue("quality2", static_cast<int>(s.quality));
     q.setValue("crf", s.crf);
-    q.setValue("x264Preset", s.x264Preset);
+    q.setValue("x264Preset2", s.x264Preset);
     q.setValue("keyframeSeconds", s.keyframeSeconds);
     q.setValue("threads", s.encoderThreads);
     q.setValue("cpuConvert", s.cpuConvert);
@@ -454,21 +646,24 @@ void saveSettings(const AppSettings& s, const QString& iniPath)
     q.sync();
 }
 
+// ----------------------------------------------------------------- profiles
+
 QStringList profileNames()
 {
     return {QStringLiteral("Low Resource"), QStringLiteral("Balanced"), QStringLiteral("High Quality"),
-            QStringLiteral("Webcam Tutorial"), QStringLiteral("Screen Only")};
+            QStringLiteral("Smooth 60 FPS"), QStringLiteral("Webcam Tutorial"), QStringLiteral("Screen Only")};
 }
 
 QString profileDescription(const QString& name)
 {
     if (name == "Low Resource")
-        return QStringLiteral("720p at 30 FPS, fastest encoder. Lightest load; best when the CPU runs hot.");
+        return QStringLiteral("1280×720 at 30 FPS, balanced quality. Lightest load; best when the CPU runs hot.");
     if (name == "Balanced")
-        return QStringLiteral("Native resolution at 30 FPS, fastest encoder, balanced quality. Recommended default.");
+        return QStringLiteral("Source size at 30 FPS, balanced quality. Recommended default.");
     if (name == "High Quality")
-        return QStringLiteral("Native resolution at 30 FPS with a slower encoder preset and higher quality. "
-                              "Uses much more CPU; may drop frames on an i5-2400S under load or when it throttles.");
+        return QStringLiteral("Source size at 30 FPS, high quality (larger files, slightly more CPU).");
+    if (name == "Smooth 60 FPS")
+        return QStringLiteral("1280×720 at 60 FPS, balanced quality - smooth motion within this PC's limits.");
     if (name == "Webcam Tutorial")
         return QStringLiteral("Screen + round webcam in the corner, microphone with voice processing, "
                               "cursor highlight and click rings.");
@@ -484,7 +679,7 @@ void applyProfile(AppSettings& s, const QString& name)
         s.resolution = ResolutionPreset::P720;
         s.fps = 30;
         s.quality = QualityPreset::Balanced;
-        s.x264Preset = QStringLiteral("ultrafast");
+        s.x264Preset = QStringLiteral("auto");
         s.webcamFilters.sharpen = 0;
         s.webcamFilters.denoise = 0;
         s.micFilters.noiseSuppression = false;
@@ -493,17 +688,22 @@ void applyProfile(AppSettings& s, const QString& name)
         s.resolution = ResolutionPreset::Native;
         s.fps = 30;
         s.quality = QualityPreset::Balanced;
-        s.x264Preset = QStringLiteral("ultrafast");
+        s.x264Preset = QStringLiteral("auto");
     } else if (name == "High Quality") {
         s.resolution = ResolutionPreset::Native;
         s.fps = 30;
-        s.quality = QualityPreset::HighQuality;
-        s.x264Preset = QStringLiteral("superfast");
+        s.quality = QualityPreset::High;
+        s.x264Preset = QStringLiteral("auto");
+    } else if (name == "Smooth 60 FPS") {
+        s.resolution = ResolutionPreset::P720;
+        s.fps = 60;
+        s.quality = QualityPreset::Balanced;
+        s.x264Preset = QStringLiteral("auto");
     } else if (name == "Webcam Tutorial") {
         s.resolution = ResolutionPreset::Native;
         s.fps = 30;
         s.quality = QualityPreset::Balanced;
-        s.x264Preset = QStringLiteral("ultrafast");
+        s.x264Preset = QStringLiteral("auto");
         s.webcamEnabled = true;
         s.webcamPlacement.shape = gpu::WebcamShape::Circle;
         s.webcamPlacement.w = 0.18f;

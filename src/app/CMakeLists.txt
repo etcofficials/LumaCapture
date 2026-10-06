@@ -8,26 +8,50 @@ add_executable(LumaCapture WIN32
     AudioMonitor.cpp
     CrashHandler.cpp
     DeviceScanner.cpp
+    DiskWorker.cpp
     History.cpp
     HotkeyManager.cpp
     Icons.cpp
     LayoutDialog.cpp
     MainWindow.cpp
+    MediaImporter.cpp
     OverlayRenderer.cpp
+    PreviewController.cpp
     RecordingController.cpp
-    SettingsDialog.cpp
+    SettingsStore.cpp
     Theme.cpp
+    ThumbnailCache.cpp
     WebcamController.cpp
     WinUtil.cpp
+    ui/AboutPage.cpp
+    ui/ContextPanels.cpp
+    ui/LibraryPage.cpp
+    ui/RecordingDelegate.cpp
+    ui/RecordPage.cpp
+    ui/SettingsPage.cpp
+    ui/UiKit.cpp
+    ui/WebcamPanel.cpp
     widgets/Widgets.cpp
     ${CMAKE_SOURCE_DIR}/resources/app.rc
     ${CMAKE_SOURCE_DIR}/resources/ui.qrc
 )
 set_target_properties(LumaCapture PROPERTIES AUTOMOC ON AUTORCC ON)
 target_include_directories(LumaCapture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_compile_definitions(LumaCapture PRIVATE LUMACAPTURE_VERSION="${PROJECT_VERSION}")
+
+# Build identifier shown on the About page: the short git commit when available.
+set(LUMA_BUILD_ID "local")
+find_program(LUMA_GIT git HINTS "G:/Git/cmd")
+if(LUMA_GIT)
+    execute_process(COMMAND "${LUMA_GIT}" rev-parse --short HEAD
+                    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                    OUTPUT_VARIABLE _rev OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE _rc)
+    if(_rc EQUAL 0 AND _rev)
+        set(LUMA_BUILD_ID "${_rev}")
+    endif()
+endif()
+target_compile_definitions(LumaCapture PRIVATE LUMACAPTURE_VERSION="${PROJECT_VERSION}" LUMACAPTURE_BUILD_ID="${LUMA_BUILD_ID}")
 target_compile_options(LumaCapture PRIVATE /W4 /wd4127)
-target_link_libraries(LumaCapture PRIVATE luma_core Qt6::Widgets Qt6::Concurrent dwmapi user32 gdi32 dbghelp)
+target_link_libraries(LumaCapture PRIVATE luma_core Qt6::Widgets Qt6::Concurrent dwmapi user32 gdi32 shell32 dbghelp)
 
 # Make build/<preset>/bin runnable: Qt runtime (windeployqt) + FFmpeg DLLs.
 get_target_property(_qmake Qt6::qmake IMPORTED_LOCATION)

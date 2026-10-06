@@ -5,6 +5,7 @@
 #include "WinUtil.h"
 #include "capture/Screenshot.h"
 #include "mux/Muxer.h"
+#include "session/PreviewExchange.h"
 #include "util/Log.h"
 
 #include <QCoreApplication>
@@ -19,6 +20,9 @@
 
 #include <windows.h>
 #include <dwmapi.h>
+
+#include <algorithm>
+#include <cmath>
 
 namespace luma::app {
 namespace {
@@ -37,15 +41,12 @@ void runAsync(QObject* ctx, Work work, Done done)
     });
 }
 
-int presetHeight(ResolutionPreset p)
+QRect windowBounds(HWND hwnd)
 {
-    switch (p) {
-    case ResolutionPreset::P1080: return 1080;
-    case ResolutionPreset::P900:  return 900;
-    case ResolutionPreset::P720:  return 720;
-    case ResolutionPreset::P480:  return 480;
-    default:                      return 0;
-    }
+    RECT r{};
+    if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r))))
+        GetWindowRect(hwnd, &r);
+    return QRect(r.left, r.top, r.right - r.left, r.bottom - r.top);
 }
 
 } // namespace
@@ -94,10 +95,9 @@ int RecordingController::monitorIndex(QRect* rect) const
     int best = -1;
     for (const MonitorEntry& m : mons) {
         if (!m_settings.displayName.isEmpty() && m.deviceName == m_settings.displayName) {
-            best = m.index;
             if (rect)
                 *rect = m.rect;
-            return best;
+            return m.index;
         }
     }
     for (const MonitorEntry& m : mons) {
@@ -112,6 +112,27 @@ int RecordingController::monitorIndex(QRect* rect) const
     return best;
 }
 
+int RecordingController::monitorOfWindow(quintptr hwnd, QRect* rect) const
+{
+    const HWND w = reinterpret_cast<HWND>(hwnd);
+    if (!w || !IsWindow(w))
+        return -1;
+    HMONITOR mon = MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST);
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi))
+        return -1;
+    const QString device = QString::fromWCharArray(mi.szDevice);
+    for (const MonitorEntry& m : m_scanner.monitors()) {
+        if (m.deviceName.compare(device, Qt::CaseInsensitive) == 0) {
+            if (rect)
+                *rect = m.rect;
+            return m.index;
+        }
+    }
+    return -1;
+}
+
 QSize RecordingController::sourceSize() const
 {
     QSize size;
@@ -124,19 +145,22 @@ QSize RecordingController::sourceSize() const
     }
     case SourceKind::Window: {
         const HWND hwnd = reinterpret_cast<HWND>(m_window);
-        if (hwnd && IsWindow(hwnd)) {
-            RECT r{};
-            if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r))))
-                GetWindowRect(hwnd, &r);
-            size = QSize(r.right - r.left, r.bottom - r.top);
-        }
+        if (hwnd && IsWindow(hwnd))
+            size = windowBounds(hwnd).size();
         break;
     }
     case SourceKind::Region:
         size = m_settings.region.size();
         break;
+    case SourceKind::Game: {
+        QRect r;
+        if (monitorOfWindow(m_game, &r) >= 0)
+            size = r.size();
+        break;
     }
-    if (m_settings.sourceKind != SourceKind::Region && size.isValid()) {
+    }
+    if ((m_settings.sourceKind == SourceKind::Display || m_settings.sourceKind == SourceKind::Window) &&
+        size.isValid()) {
         const int w = size.width() - m_settings.cropLeft - m_settings.cropRight;
         const int h = size.height() - m_settings.cropTop - m_settings.cropBottom;
         if (w > 16 && h > 16)
@@ -147,37 +171,25 @@ QSize RecordingController::sourceSize() const
 
 QSize RecordingController::outputSize() const
 {
-    const QSize src = sourceSize();
-    if (!src.isValid() || src.isEmpty())
-        return {};
-    int w = src.width(), h = src.height();
-    const int target = presetHeight(m_settings.resolution);
-    if (target > 0 && target < h) { // never upscale; keep the source aspect ratio
-        w = static_cast<int>(std::lround(static_cast<double>(w) * target / h));
-        h = target;
-    }
-    return QSize(std::max(16, w & ~1), std::max(16, h & ~1));
+    return scaledOutputSize(sourceSize(), m_settings.resolution);
 }
 
 QString RecordingController::sourceDescription() const
 {
     switch (m_settings.sourceKind) {
     case SourceKind::Display: {
-        QRect r;
-        const int idx = monitorIndex(&r);
+        const int idx = monitorIndex(nullptr);
         for (const MonitorEntry& m : m_scanner.monitors())
             if (m.index == idx)
                 return QStringLiteral("Display %1%2").arg(m.index + 1).arg(m.primary ? QStringLiteral(" (primary)") : QString());
         return QStringLiteral("Display");
     }
     case SourceKind::Window:
-        return QStringLiteral("Window \"%1\"").arg(m_settings.windowTitle);
+        return m_settings.windowTitle.isEmpty() ? QStringLiteral("Window") : QStringLiteral("Window \"%1\"").arg(m_settings.windowTitle);
     case SourceKind::Region:
-        return QStringLiteral("Region %1x%2 at (%3, %4)")
-            .arg(m_settings.region.width())
-            .arg(m_settings.region.height())
-            .arg(m_settings.region.x())
-            .arg(m_settings.region.y());
+        return QStringLiteral("Region %1×%2").arg(m_settings.region.width()).arg(m_settings.region.height());
+    case SourceKind::Game:
+        return m_settings.gameTitle.isEmpty() ? QStringLiteral("Game") : QStringLiteral("Game \"%1\"").arg(m_settings.gameTitle);
     }
     return {};
 }
@@ -199,10 +211,39 @@ QString RecordingController::validateSource() const
     }
     case SourceKind::Region:
         if (m_settings.region.width() < 32 || m_settings.region.height() < 32)
-            return QStringLiteral("Select a region of at least 32x32 pixels.");
+            return QStringLiteral("Select a region of at least 32×32 pixels.");
+        break;
+    case SourceKind::Game: {
+        const HWND hwnd = reinterpret_cast<HWND>(m_game);
+        if (!hwnd || !IsWindow(hwnd))
+            return QStringLiteral("Start your game, then choose its window under Game.");
+        if (monitorOfWindow(m_game, nullptr) < 0)
+            return QStringLiteral("The game's monitor was not found. Press Refresh.");
         break;
     }
+    }
     return {};
+}
+
+QRect RecordingController::capturedScreenRect() const
+{
+    QRect r;
+    switch (m_settings.sourceKind) {
+    case SourceKind::Display:
+        monitorIndex(&r);
+        if (m_settings.cropLeft || m_settings.cropTop || m_settings.cropRight || m_settings.cropBottom)
+            r.adjust(m_settings.cropLeft, m_settings.cropTop, -m_settings.cropRight, -m_settings.cropBottom);
+        break;
+    case SourceKind::Region:
+        r = m_settings.region;
+        break;
+    case SourceKind::Game:
+        monitorOfWindow(m_game, &r);
+        break;
+    case SourceKind::Window:
+        break;
+    }
+    return r;
 }
 
 QString RecordingController::makeOutputPath() const
@@ -214,8 +255,7 @@ QString RecordingController::makeOutputPath() const
     name.replace(QStringLiteral("{time}"), now.toString(QStringLiteral("HH-mm-ss")));
     name.replace(QStringLiteral("{res}"), QStringLiteral("%1x%2").arg(out.width()).arg(out.height()));
     name.replace(QStringLiteral("{fps}"), QString::number(m_settings.fps));
-    static const char* kinds[] = {"Display", "Window", "Region"};
-    name.replace(QStringLiteral("{source}"), QString::fromLatin1(kinds[static_cast<int>(m_settings.sourceKind)]));
+    name.replace(QStringLiteral("{source}"), sourceKindName(m_settings.sourceKind));
     name = sanitizeFileName(name);
 
     const QDir dir(m_settings.outputDir);
@@ -225,7 +265,7 @@ QString RecordingController::makeOutputPath() const
     return path;
 }
 
-gpu::CompositionSettings RecordingController::buildComposition(int outW, int outH)
+gpu::CompositionSettings RecordingController::buildComposition(int outW, int outH, bool withWebcam)
 {
     gpu::CompositionSettings c;
     c.filters = m_settings.videoFilters;
@@ -235,19 +275,16 @@ gpu::CompositionSettings RecordingController::buildComposition(int outW, int out
         c.cursor.clicks = false;
     }
     c.webcam = resolvedPlacement(m_settings.webcamPlacement, m_webcam.aspect(m_settings.webcamPlacement), outW, outH);
-    c.webcam.enabled = m_settings.webcamEnabled && m_webcam.frames() != nullptr;
+    c.webcam.enabled = withWebcam && m_settings.webcamEnabled && m_webcam.frames() != nullptr;
     c.overlay = m_overlay.render(m_settings, outW, outH);
     return c;
 }
 
-session::SessionConfig RecordingController::buildConfig(QString& error)
+bool RecordingController::fillSource(session::SourceConfig& src, QString& error) const
 {
-    session::SessionConfig cfg;
     error = validateSource();
     if (!error.isEmpty())
-        return cfg;
-
-    auto& src = cfg.source;
+        return false;
     src.captureCursor = m_settings.captureCursor;
     switch (m_settings.sourceKind) {
     case SourceKind::Display:
@@ -264,8 +301,14 @@ session::SessionConfig RecordingController::buildConfig(QString& error)
         src.region = RECT{r.left(), r.top(), r.left() + r.width(), r.top() + r.height()};
         break;
     }
+    case SourceKind::Game:
+        // The game's whole monitor through Desktop Duplication: works for full-screen and
+        // borderless games, follows exclusive-mode switches, and shows no capture border.
+        src.kind = session::SourceKind::Display;
+        src.outputIndex = static_cast<unsigned>(std::max(0, monitorOfWindow(m_game, nullptr)));
+        break;
     }
-    if (m_settings.sourceKind != SourceKind::Region &&
+    if ((m_settings.sourceKind == SourceKind::Display || m_settings.sourceKind == SourceKind::Window) &&
         (m_settings.cropLeft || m_settings.cropTop || m_settings.cropRight || m_settings.cropBottom)) {
         QSize full = sourceSize();
         full = QSize(full.width() + m_settings.cropLeft + m_settings.cropRight,
@@ -273,6 +316,14 @@ session::SessionConfig RecordingController::buildConfig(QString& error)
         src.crop = RECT{m_settings.cropLeft, m_settings.cropTop, full.width() - m_settings.cropRight,
                         full.height() - m_settings.cropBottom};
     }
+    return true;
+}
+
+session::SessionConfig RecordingController::buildConfig(QString& error)
+{
+    session::SessionConfig cfg;
+    if (!fillSource(cfg.source, error))
+        return cfg;
 
     const QSize out = outputSize();
     if (out.isEmpty()) {
@@ -285,8 +336,10 @@ session::SessionConfig RecordingController::buildConfig(QString& error)
     cfg.fps = m_settings.fps;
     cfg.cpuConvert = m_settings.cpuConvert;
     cfg.queueCapacity = static_cast<unsigned>(m_settings.queueCapacity);
-    cfg.encoder.preset = m_settings.x264Preset.toStdString();
-    cfg.encoder.crf = m_settings.crfForQuality();
+    const EncoderChoice enc = resolveEncoder(m_settings);
+    cfg.encoder.preset = enc.preset.toStdString();
+    cfg.encoder.crf = enc.crf;
+    cfg.encoder.x264Params = enc.x264Params.toStdString();
     cfg.encoder.keyframeSeconds = m_settings.keyframeSeconds;
     cfg.encoder.threads = m_settings.encoderThreads;
 
@@ -306,8 +359,39 @@ session::SessionConfig RecordingController::buildConfig(QString& error)
 
     if (m_settings.webcamEnabled)
         cfg.webcamFrames = m_webcam.frames();
-    cfg.composition = buildComposition(out.width(), out.height());
+    cfg.composition = buildComposition(out.width(), out.height(), true);
+    if (m_preview && m_settings.livePreview && m_settings.previewWhileRecording) {
+        cfg.preview = m_preview;
+        cfg.previewIntervalMs = static_cast<unsigned>(1000 / std::clamp(m_settings.previewFps, 2, 15));
+    }
     cfg.outputFile = makeOutputPath().toStdWString();
+    return cfg;
+}
+
+session::SessionConfig RecordingController::buildPreviewConfig(QString& error)
+{
+    session::SessionConfig cfg;
+    if (!fillSource(cfg.source, error))
+        return cfg;
+    QSize out = outputSize();
+    if (out.isEmpty()) {
+        error = QStringLiteral("Could not determine the size of the capture source.");
+        return cfg;
+    }
+    // The idle preview never needs more than ~540p: compose at a reduced size (cheaper on
+    // the GPU); overlays and the webcam placement scale with the frame.
+    if (out.height() > 540)
+        out = QSize(static_cast<int>(std::lround(out.width() * 540.0 / out.height())) & ~1, 540);
+    const int fps = std::clamp(m_settings.previewFps, 2, 15);
+    cfg.width = out.width();
+    cfg.height = out.height();
+    cfg.fps = fps;
+    cfg.previewOnly = true;
+    cfg.preview = m_preview;
+    cfg.previewIntervalMs = static_cast<unsigned>(1000 / fps);
+    cfg.recordAudio = false;
+    // No webcam in the idle preview: it would tie the camera to the preview session.
+    cfg.composition = buildComposition(out.width(), out.height(), false);
     return cfg;
 }
 
@@ -315,13 +399,6 @@ void RecordingController::start()
 {
     if (busy()) {
         log::info("Start ignored: recording state is {}", session::stateName(m_state));
-        return;
-    }
-    if (!QDir().mkpath(m_settings.outputDir)) {
-        emit errorOccurred(QStringLiteral("Cannot record"),
-                           QStringLiteral("The output folder %1 cannot be created. Choose another folder in "
-                                          "Settings > General.")
-                               .arg(QDir::toNativeSeparators(m_settings.outputDir)));
         return;
     }
     QString error;
@@ -335,6 +412,9 @@ void RecordingController::start()
     m_currentFile = QString::fromStdWString(cfg.outputFile.wstring());
     m_stopRequestedByError = false;
     m_lastStatus = {};
+    m_dropWindow.clear();
+    m_lastBehindWarning.invalidate();
+    const QString outputDir = m_settings.outputDir;
 
     std::shared_ptr<session::RecordingSession> sessionPtr;
     try {
@@ -346,7 +426,13 @@ void RecordingController::start()
     }
     runAsync(
         this,
-        [sessionPtr]() -> QString {
+        [sessionPtr, outputDir]() -> QString {
+            // The output folder is created here, not on the UI thread: on a sleeping or
+            // slow HDD even this can take seconds.
+            if (!QDir().mkpath(outputDir))
+                return QStringLiteral("The output folder %1 cannot be created. Choose another folder in "
+                                      "Settings > Output.")
+                    .arg(QDir::toNativeSeparators(outputDir));
             try {
                 sessionPtr->start();
                 return {};
@@ -390,17 +476,44 @@ void RecordingController::pollStatus()
         stop();
         return;
     }
-    if (++m_diskCheckCounter >= 20) { // every 5 s
-        m_diskCheckCounter = 0;
-        const int64_t free = freeDiskBytes(m_settings.outputDir);
-        if (free >= 0 && free < 300ll * 1024 * 1024 && !m_stopRequestedByError) {
-            m_stopRequestedByError = true;
-            emit errorOccurred(QStringLiteral("Disk almost full"),
-                               QStringLiteral("Less than 300 MB is left on the recording drive. The recording was "
-                                              "stopped and saved to avoid a damaged file."));
-            stop();
+
+    // Falling behind: more than 2 % of the frames of the last ~5 s were dropped.
+    m_dropWindow.emplace_back(m_lastStatus.ticks, m_lastStatus.droppedFrames);
+    while (m_dropWindow.size() > 20)
+        m_dropWindow.pop_front();
+    if (m_settings.warnFallingBehind && !m_lastStatus.paused && m_dropWindow.size() >= 12) {
+        const int64_t ticks = m_lastStatus.ticks - m_dropWindow.front().first;
+        const int64_t drops = m_lastStatus.droppedFrames - m_dropWindow.front().second;
+        if (ticks > 0 && drops >= 5 && drops * 100 > ticks * 2 &&
+            (!m_lastBehindWarning.isValid() || m_lastBehindWarning.elapsed() > 30000)) {
+            m_lastBehindWarning.start();
+            log::warn("Recording is falling behind: {} of {} frames dropped in the last seconds", drops, ticks);
+            emit fallingBehind(100.0 * static_cast<double>(drops) / static_cast<double>(ticks));
         }
     }
+
+    if (++m_diskCheckCounter >= 20) { // every 5 s, off the UI thread
+        m_diskCheckCounter = 0;
+        const QString dir = m_settings.outputDir;
+        runAsync(
+            this, [dir]() -> qint64 { return freeDiskBytes(dir); },
+            [this](qint64 free) {
+                if (free >= 0 && free < 300ll * 1024 * 1024 && capturing() && !m_stopRequestedByError) {
+                    m_stopRequestedByError = true;
+                    emit errorOccurred(QStringLiteral("Disk almost full"),
+                                       QStringLiteral("Less than 300 MB is left on the recording drive. The "
+                                                      "recording was stopped and saved to avoid a damaged file."));
+                    stop();
+                }
+            });
+    }
+}
+
+void RecordingController::takeAudioPeaks(float& system, float& mic)
+{
+    system = mic = 0.f;
+    if (m_session && capturing())
+        m_session->takeAudioPeaks(system, mic);
 }
 
 void RecordingController::stop()
@@ -419,6 +532,7 @@ void RecordingController::stop()
         mux::MediaInfo media;
         bool probed = false;
         bool fileOk = false;
+        qint64 size = 0;
     };
     auto sessionPtr = m_session;
     const bool toMp4 = m_settings.container == Container::Mp4;
@@ -431,7 +545,7 @@ void RecordingController::stop()
             StopResult r;
             r.file = mkv;
             try {
-                sessionPtr->stop(); // flushes encoders and writes the trailer
+                sessionPtr->stop(); // flushes encoders, drains the file writer, writes the trailer
             } catch (const std::exception& e) {
                 r.error = QString::fromUtf8(e.what());
             } catch (...) {
@@ -457,6 +571,7 @@ void RecordingController::stop()
             }
             r.probed = mux::probeMedia(r.file.toStdWString(), r.media);
             r.fileOk = r.probed && QFileInfo::exists(r.file);
+            r.size = QFileInfo(r.file).size();
             return r;
         },
         [this](const StopResult& r) {
@@ -472,8 +587,8 @@ void RecordingController::stop()
                 e.durationSeconds = r.media.durationSeconds;
                 e.width = r.media.width;
                 e.height = r.media.height;
-                e.fps = r.media.fps > 0 ? static_cast<int>(std::lround(r.media.fps)) : m_settings.fps;
-                e.sizeBytes = QFileInfo(r.file).size();
+                e.fps = r.media.fps > 0 ? r.media.fps : m_settings.fps;
+                e.sizeBytes = r.size;
                 m_history.add(e);
                 emit historyChanged();
                 emit recordingSaved(r.file, !r.error.isEmpty());
@@ -520,32 +635,32 @@ void RecordingController::updateLive()
 {
     if (!m_session || !capturing())
         return;
-    m_session->setComposition(buildComposition(m_outSize.width(), m_outSize.height()));
+    m_session->setComposition(buildComposition(m_outSize.width(), m_outSize.height(), true));
     m_session->setAudioVolumes(static_cast<float>(m_settings.systemVolume), static_cast<float>(m_settings.micVolume));
     m_session->setMicFilters(m_settings.micFilters);
 }
 
 void RecordingController::takeScreenshot()
 {
-    QDir().mkpath(m_settings.screenshotDir);
-    const QString file = QDir(m_settings.screenshotDir)
-                             .filePath(QStringLiteral("Screenshot_%1.png")
-                                           .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss-zzz"))));
+    const QString dir = m_settings.screenshotDir.isEmpty() ? m_settings.outputDir + QStringLiteral("/Screenshots")
+                                                           : m_settings.screenshotDir;
+    const QString file = QDir(dir).filePath(
+        QStringLiteral("Screenshot_%1.png").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss-zzz"))));
     const bool cursor = m_settings.screenshotCursor && m_settings.captureCursor;
     const SourceKind kind = m_settings.sourceKind;
     const HWND hwnd = reinterpret_cast<HWND>(m_window);
-    QRect rect;
-    if (kind == SourceKind::Display) {
-        monitorIndex(&rect);
-        if (m_settings.cropLeft || m_settings.cropTop || m_settings.cropRight || m_settings.cropBottom)
-            rect.adjust(m_settings.cropLeft, m_settings.cropTop, -m_settings.cropRight, -m_settings.cropBottom);
-    } else if (kind == SourceKind::Region) {
-        rect = m_settings.region;
+    const QString problem = validateSource();
+    if (!problem.isEmpty()) {
+        emit errorOccurred(QStringLiteral("Screenshot not taken"), problem);
+        return;
     }
+    const QRect rect = capturedScreenRect();
     runAsync(
         this,
         [=]() -> QString {
             try {
+                // LumaCapture's own windows are excluded from capture (WDA_EXCLUDEFROMCAPTURE),
+                // so they are not part of the screenshot.
                 capture::ScreenshotImage img;
                 if (kind == SourceKind::Window)
                     img = capture::screenshotWindow(hwnd, cursor);
@@ -555,18 +670,22 @@ void RecordingController::takeScreenshot()
                                                   cursor);
                 const QImage q(reinterpret_cast<const uchar*>(img.pixels.data()), static_cast<int>(img.width),
                                static_cast<int>(img.height), static_cast<qsizetype>(img.width) * 4, QImage::Format_RGB32);
+                if (!QDir().mkpath(dir))
+                    return QStringLiteral("!Cannot create the folder %1").arg(QDir::toNativeSeparators(dir));
                 if (!q.save(file, "PNG"))
-                    return QStringLiteral("!Could not write %1").arg(file);
+                    return QStringLiteral("!Could not write %1").arg(QDir::toNativeSeparators(file));
                 return file;
             } catch (const std::exception& e) {
                 return QStringLiteral("!") + QString::fromUtf8(e.what());
             }
         },
         [this](const QString& result) {
-            if (result.startsWith('!'))
+            if (result.startsWith('!')) {
                 emit errorOccurred(QStringLiteral("Screenshot failed"), result.mid(1));
-            else
-                emit info(QStringLiteral("Screenshot saved: %1").arg(QDir::toNativeSeparators(result)));
+            } else {
+                log::info("Screenshot saved: {}", result.toStdString());
+                emit screenshotSaved(result);
+            }
         });
 }
 
@@ -619,7 +738,7 @@ void RecordingController::recover(const QList<RecoveryCandidate>& items)
                         e.durationSeconds = mi.durationSeconds;
                         e.width = mi.width;
                         e.height = mi.height;
-                        e.fps = static_cast<int>(std::lround(mi.fps));
+                        e.fps = mi.fps;
                     }
                     e.sizeBytes = QFileInfo(out).size();
                     r.ok.append(e);
