@@ -3,7 +3,7 @@
   Builds LumaCapture (Release) and assembles the portable distribution:
       G:\LumaCapture\dist\LumaCapture\
   Contents: LumaCapture.exe, Launch-LumaCapture.bat, Create-Desktop-Shortcut.bat,
-  luma-bench.exe, Qt runtime (windeployqt), FFmpeg DLLs, MSVC runtime (app-local),
+  luma-bench.exe, Qt runtime (windeployqt), FFmpeg DLLs, MSVC runtime (app-local), app icon,
   licenses\, README.txt.
   An existing LumaCapture-data folder (the user's settings, history, logs) is kept.
   Then verifies the package: every DLL import resolves inside the folder or to
@@ -102,6 +102,6 @@ try {
 $deadline = (Get-Date).AddSeconds(60)
 while (-not (Test-Path "$shots\layout.png") -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
 Start-Sleep 2
-if (-not (Test-Path "$shots\main.png")) { throw "Standalone launch via the launcher failed (no UI snapshot produced)" }
+if (-not (Test-Path "$shots\record.png")) { throw "Standalone launch via the launcher failed (no UI snapshot produced)" }
 Write-Host "Launcher check: the packaged app started from '$verify' (spaces, minimal PATH) and rendered its UI."
 Remove-Item -Recurse -Force "$root\build\dist verify (spaces)"

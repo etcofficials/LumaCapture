@@ -16,3 +16,6 @@ LumaCapture-data/
 # Tooling
 __pycache__/
 *.pyc
+
+# Release outputs (ZIP, Setup.exe) - published on GitHub Releases, never committed
+release/

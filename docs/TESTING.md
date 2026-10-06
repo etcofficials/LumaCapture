@@ -1,103 +1,73 @@
-# Testing - LumaCapture 1.0.0
+# Testing - LumaCapture 2.0.0
 
-These are the results on the development PC: i5-2400S (4C/4T, AVX, no AVX2),
-12 GB RAM, GeForce GT 730 (Fermi), Windows 10 22H2, 1920×1080 @ 60 Hz, and a
-Logitech C270 webcam. All runs were short by design: no stress tests, long
-recordings or thermal loads. The CPU clock was sampled during the hardware and
-GUI runs; it stayed at about 110 % of base, so no throttling occurred.
+## Status: NOT BUILT, NOT TESTED
 
-## How to run
+Version 2.0.0 was written while the development PC's G: drive (Seagate ST500DM002) was
+logging escalating hardware read errors (Windows events 153, 7 and 154 since August 2026;
+the compiler crashed with "in-page error" on 2026-10-05). On the owner's instruction the
+v2 code was **edited and saved only - no builds, tests, benchmarks or app launches**.
+Nothing below the "Test plan" heading has been run against v2.
 
-```
-powershell -File scripts\test.ps1              # 11 unit tests (no devices needed)
-powershell -File scripts\test.ps1 -Hardware    # + 6 hardware tests (webcam, audio, screen, crash recovery)
-powershell -File scripts\test.ps1 -Gui         # + scripted GUI self-test (records ~6 s of the screen)
-```
+## Measurements made during the v2 work (before the edit-only phase)
 
-Output goes to `build\test-output` and never to the recording folder. The
-script stops a run if the CPU falls below 60 % of its base clock.
+### Encoder study (offline, on the target PC)
 
-## Automated results (release build)
+Lossless 10 s 1080p30 references: a scrolling text/code "screen" page with a video inset,
+and a natural-motion clip. Each candidate encoded with the app's settings (libx264, 3
+threads, 2 s keyframes, BT.709 limited); quality measured against the reference with
+timestamps aligned (`settb=1/30,setpts=N`). CPU = user CPU seconds per frame.
 
-| Test | Result | Notes |
-|---|---|---|
-| state_machine_happy_path / rejects_invalid_requests | PASS | double start/stop, pause while idle etc. rejected |
-| pause_timeline_offsets | PASS | |
-| audio_ring_positions_and_silence | PASS | |
-| bounded_queue_never_blocks_producer / close_wakes_consumer | PASS | |
-| frame_exchange_latest_frame_and_no_blocking | PASS | |
-| frame_pool_is_bounded_and_reusable | PASS | |
-| webcam_processor_identity_and_fastpath | PASS | |
-| webcam_chroma_key_removes_green | PASS | |
-| auto_adjust_is_deterministic_and_sensible | PASS | |
-| hw webcam_controls_and_pacing | PASS | 10 controls read; 31 fps; filter chain 1.1 ms/frame |
-| hw webcam_exposure_priority_effect | PASS | original setting restored afterwards |
-| hw recording_lifecycle_short | PASS | 720p30 + system + mic + webcam, pause; start 138 ms, stop 200 ms, 0 dropped; video 5.03 s = audio 5.03 s |
-| hw mp4_conversion | PASS | 5.03 s |
-| hw crash_recovery | PASS | process killed while recording; recovered file decodes (62 frames) |
-| hw webcam_start_stop_cycles | PASS | 6 cycles, each stop 474-523 ms (the earlier internal build could hang here indefinitely) |
-| GUI self-test | PASS | see below |
+| Content | Setting | Mbit/s | CPU s/frame | VMAF | SSIM Y | PSNR Y |
+|---|---|---|---|---|---|---|
+| screen | ultrafast CRF 23 (v1 default) | 4.88 | 0.0327 | 99.96 | 0.9979 | 50.7 |
+| screen | ultrafast CRF 18 | 7.50 | 0.0328 | 99.96 | 0.9990 | 54.8 |
+| screen | ultrafast CRF 21 + deblock | 5.53 | 0.0340 | 99.96 | 0.9984 | 52.3 |
+| screen | superfast CRF 23 | 3.29 | 0.0415 | 99.95 | 0.9977 | 47.2 |
+| screen | veryfast CRF 23 | 1.80 | 0.0503 | 99.93 | 0.9955 | 42.9 |
+| motion | ultrafast CRF 23 (v1 default) | 7.67 | 0.0351 | 95.97 | 0.9897 | 45.9 |
+| motion | ultrafast CRF 18 | 13.55 | 0.0383 | 96.98 | 0.9943 | 49.3 |
+| motion | ultrafast CRF 21 + deblock | 9.43 | 0.0389 | 96.43 | 0.9925 | 47.4 |
+| motion | superfast CRF 23 | 3.80 | 0.0496 | 93.57 | 0.9894 | 43.7 |
+| motion | veryfast CRF 23 | 2.26 | 0.0633 | 91.79 | 0.9870 | 42.3 |
 
-GUI self-test sequence:
-1. Start twice (the second press is ignored).
-2. Pause, then resume.
-3. Stop twice (the second press is ignored).
-4. Wait for "saved", then check the file.
-5. Turn the webcam on, then off.
-6. Open and close the webcam settings page.
+Conclusion used for the v2 presets: on this 4-core Sandy Bridge, x264 "ultrafast" with
+deblocking and a lower CRF gives the best quality per CPU second; slower presets cost
+40-80 % more CPU and score lower at the same CRF. The CPU clock fell to ~80 % of base
+within seconds of the slower runs (thermal throttling; earlier benchmarks saw 45 %).
 
-The state path observed was Idle → Starting → Recording → Paused → Recording →
-Stopping → Finalizing → Idle. The run encoded 188 frames with 0 dropped. The
-file was 1920×1080 H.264 + AAC, 6.3 s long, and `ffmpeg -f null` decoded it
-without errors.
+### Hang analysis of 1.0 (from the user's hang dump, 2026-10-05 22:49)
 
-Packaging check (`scripts\package.ps1`):
-- Every DLL import of every packaged binary resolves inside the package or to
-  Windows.
-- A copy of the package in a path with spaces started through
-  `Launch-LumaCapture.bat` from `C:\Windows` as the working directory, with
-  PATH limited to Windows folders, and rendered its UI.
+UI thread stack: `MainWindow::closeEvent -> saveSettings -> QSettings::sync ->
+QLockFile::tryLock -> FlushFileBuffers` - blocked on the failing G: drive (disk error
+events at 22:47-22:53). Fixed in v2 by moving all settings/history writes to a
+background disk worker.
 
-## Webcam investigation ("shutter" / stutter)
+## Results of 1.0.1 (for reference)
 
-Measured on the C270 in the test room:
-- The camera ran with auto-exposure at about 62 ms (-4), gain 113 and
-  exposure priority ON.
-- It delivered 31 fps on average, but the longest gap between frames was about
-  64 ms.
-- With exposure priority OFF, the gap stayed about 64 ms and the picture became
-  much darker (median luma 0.27 → 0.05).
-- Conclusion: the room light is too low for the sensor at 30 fps. The camera
-  exposes longer than one frame. This is a physical limit, not mains-light
-  flicker and not a LumaCapture slowdown.
-- Mitigations in the app:
-  - an Anti-flicker control;
-  - a Low-light priority choice;
-  - Auto adjust, which brightens in software instead of lengthening the
-    exposure;
-  - a live pacing readout that explains the effect.
+17 automated tests (unit + hardware) and the scripted GUI self-test passed on
+2026-09-27 on the target PC; see git history of this file for the details.
 
-Older measurements: the earlier internal build's synchronous reader delivered
-about 24 fps from the same camera; this release's asynchronous reader delivers
-about 30 fps. The preview was 15 fps before and now runs at the camera rate.
+## Test plan for 2.0.0 (to run once the build environment is reliable)
 
-## Not tested (or only partly)
+Short, controlled runs only (5-10 s first, then at most 30-60 s); stop if the CPU clock
+falls below 60 % of base. `scripts\test.ps1` samples the clock automatically.
 
-Automated tests do not cover these, and they were not tested manually during
-this release. Use the checklist in `docs/USER-GUIDE.txt`.
-
-- Window capture and region capture through the GUI. The capture code is
-  unchanged since the earlier internal build.
-- Global hotkeys pressed while another application has focus.
-- Microphone processing chains (gate, compressor, EQ, noise suppression) by ear.
-- Audio device unplug/replug and default-device changes while recording.
-- Webcam unplug while recording. There is code for it (a retry every 3 s and a
-  5 s stall detection), but it was not exercised.
-- GPU device loss (driver reset).
-- The low-disk auto-stop at 300 MB free.
-- Light theme (only the dark theme was reviewed in snapshots).
-- Layout dialog interaction, overlays, screenshots, and the countdown and
-  floating bar.
-- Recordings longer than about 10 s, and 1080p60 in the GUI. Earlier
-  `luma-bench` runs showed 1080p60 is too heavy for this CPU.
-- Other webcams (only the C270 was available).
+1. **Build:** `scripts\build.ps1`; fix compile errors (v2 was never compiled).
+2. **Unit + hardware tests:** `scripts\test.ps1 -Hardware` - includes the new
+   `capture_exclusion_in_recorded_file` probe (records the screen with test windows of
+   each kind and decodes the file to see which ones appear).
+3. **GUI self-test:** `scripts\test.ps1 -Gui` (record, pause, resume, double stop, webcam
+   on/off, webcam tab, settings page).
+4. **Own UI not in the recording:** record a display with the main window and the HUD
+   visible; decode frames; confirm neither appears.
+5. **Matrix (10 s each, cool-down between):** 720p30, 1080p30, 720p60, 1080p60 with the
+   motion clip playing - verify for each file: resolution, frame rate (avg and per-frame
+   timestamps), codec, pixel format (yuv420p), audio codec / sample rate, duration, size,
+   captured/encoded/dropped/repeated frames, latencies, CPU/RAM/GPU; decode sample frames.
+6. **Features:** window, region and game capture; webcam + overlay + Auto adjust;
+   system audio + mic; screenshot (and that it excludes LumaCapture); library (thumbnails,
+   rename, delete, details); import + drag & drop (valid, invalid and large files);
+   hotkeys while another program has focus; crash recovery.
+7. **Packaging:** `scripts\package.ps1` (dependency check, launch from a path with spaces);
+   `scripts\make-release.ps1 -Version 2.0.0`; install the Setup.exe into a G: folder,
+   check Start Menu / Desktop shortcuts, icon, uninstall entry, then uninstall.

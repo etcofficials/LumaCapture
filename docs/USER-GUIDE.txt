@@ -1,129 +1,91 @@
-LumaCapture 1.0.0 - user guide and manual test checklist
-=========================================================
+LumaCapture 2.0.0 - user guide
+==============================
 
 STARTING
-  Double-click "Launch-LumaCapture.bat" (or LumaCapture.exe) in the
-  LumaCapture folder. It is portable: nothing is installed, and the folder can
-  be moved anywhere (paths with spaces are fine). "Create-Desktop-Shortcut.bat"
-  adds a desktop shortcut after asking you first.
+  Installer version: Start Menu > LumaCapture (or the Desktop shortcut).
+  Portable version: double-click LumaCapture.exe in the LumaCapture folder.
+  Settings, the library list, logs and crash reports are kept in the
+  "LumaCapture-data" folder next to the program when that folder is writable,
+  otherwise in %LOCALAPPDATA%\LumaCapture. Recordings go to your
+  Videos\LumaCapture folder unless you choose another one (Output).
 
-  Settings, history, logs and crash dumps are kept in the "LumaCapture-data"
-  folder next to the exe. Recordings go to your Windows Videos\LumaCapture
-  folder (change this with "Change..." or in Settings > General).
+THE RECORD PAGE
+  Left    Capture Mode - Display, Window, Region or Game (Beta) and what to
+          record; Sources - webcam, microphone, system audio on/off; Output -
+          folder, file name, container; Quick Settings - profile, resolution,
+          frame rate, quality.
+  Centre  Live preview of exactly what will be recorded, the timer, the Record /
+          Pause / Stop / Screenshot buttons, audio meters, and your recent
+          recordings.
+  Right   Video, Audio, Webcam, Effects and Overlays settings.
 
-BASIC WORKFLOW
-  1. Source: Display / Window / Region.
-  2. Video: resolution, frame rate, quality and encoder speed.
-  3. Audio: system audio and/or microphone (meters, volume, mute).
-  4. Webcam: switch "Show webcam in recording" on. "Image & camera..." adjusts
-     the picture; "Layout & overlays..." places it.
-  5. Press "Start recording" (or Ctrl+Alt+R). Stop with the same button or
-     hotkey.
-  6. The panel shows the state: Recording / Paused / Saving. "Saved" appears
-     only after the file has been finalised and checked. The recording is then
-     listed under "Recent recordings" (Play, Show in folder, Delete).
+RECORDING
+  1. Choose a capture mode and target.
+  2. Press Record (Ctrl+Alt+R). LumaCapture's own windows are not recorded.
+  3. Pause/Resume with Ctrl+Alt+P; Stop with Stop or Ctrl+Alt+R.
+  4. "Saving..." is shown until the file is finished and checked; then it
+     appears under Recent Recordings and in the Library.
+  Game (Beta) records the whole monitor the chosen game window is on - this
+  works for full-screen and borderless games. Window capture records one window
+  even when covered; on Windows 10 Windows draws a yellow border around it.
 
-RECOMMENDED SETTINGS FOR THIS PC (i5-2400S, GT 730 - no hardware encoder)
-  - Native (1080p) 30 FPS, encoder "ultrafast", Balanced quality.
-  - 720p 60 FPS "ultrafast" also kept up in tests. 1080p60, and slower presets
-    at 1080p, dropped frames under continuous motion (the CPU throttles under
-    load).
-  - Watch the "Dropped" tile while recording. If it rises, lower the frame
-    rate or resolution.
+RECOMMENDED SETTINGS FOR OLDER QUAD-CORE PCs (e.g. i5-2400S, no hardware encoder)
+  Source size (1080p) at 30 FPS, Balanced quality - or 1280x720 at 60 FPS.
+  The Video tab shows an estimate (Light / Moderate / Heavy / Very heavy) and a
+  resolution guide for this PC. If a recording falls behind (drops frames)
+  LumaCapture says so; lower the resolution, frame rate or quality.
 
-WEBCAM QUALITY
-  Open "Image & camera..." (Settings > Webcam & filters). The camera runs while
-  this page is open.
-  - Auto adjust: analyses the current picture once and sets brightness
-    (gamma/exposure), contrast and white balance; in dim scenes it adds light
-    noise reduction. It does not keep changing afterwards, so the picture does
-    not "pump". Press it again if the lighting changes.
-  - Preset...: Natural, Brighter, Warm, Cool, Monochrome, Low light, as
-    starting points. Reset returns to the unprocessed image.
-  - Before / after: the original and the processed picture side by side.
-  - Filters on: switches all processing on or off.
-  - The Image tab has manual sliders: brightness, contrast, gamma, exposure,
-    saturation, temperature/tint, RGB, sharpen and denoise.
-  - Camera & lighting tab (the camera's own controls; only those it supports
-    are shown):
-      Anti-flicker - set it to your mains frequency (50 Hz in most of Europe,
-        Asia and Africa; 60 Hz in the Americas) if you see rolling bands
-        under room lights.
-      Low light - "Smooth motion" keeps the full frame rate (darker picture);
-        "Brighter image" lets the camera expose longer (the picture is
-        brighter, but motion blurs and stutters in dim rooms).
-      Exposure, gain, white balance, focus, backlight and others each have an
-        Auto box and a Default button.
-  - The line under the camera settings shows the real frame rate and the
-    longest gap between frames. If it reports that the camera is holding
-    frames, the room is too dark for the sensor at that frame rate. Add light
-    facing you, or choose "Smooth motion" and use Auto adjust.
+QUALITY PRESETS (x264 on the CPU)
+  Low = smallest files, Balanced = recommended, High / Very High = sharper and
+  larger files with slightly more CPU. Advanced (Video tab) shows CRF, x264
+  preset, keyframe interval and threads.
 
-  Why does the webcam seem to "shutter"?
-    Measured on a Logitech C270 in a dim room: the camera exposed for 62 ms
-    (longer than one 30 fps frame), so it held frames and motion looked jerky.
-    This is a limit of the sensor, not flicker from the lights and not a
-    LumaCapture slowdown. More light, "Smooth motion" and Auto adjust give the
-    best result.
+WEBCAM (Webcam tab)
+  Choose the camera and mode; the preview runs while the tab is open.
+  Auto adjust analyses the picture once and sets brightness, contrast and
+  colour; Preset and Reset; Before / after; picture sliders.
+  Camera & lighting shows only the controls your camera supports:
+    Anti-flicker - 50 Hz (Europe, Asia, Africa, Australia) or 60 Hz (Americas)
+      if you see rolling bands under room lights.
+    Low light - "Smooth motion" keeps the full frame rate (darker);
+      "Brighter image" lets the camera expose longer (blur/stutter in dim rooms).
+  If the stats line says frames are held, the room is too dark for the sensor:
+  add light facing you, choose "Smooth motion" and use Auto adjust. Software
+  cannot add detail the sensor never captured.
+  Placement, size, opacity, shape and border are in the Overlays tab.
 
-DEFAULT HOTKEYS (change them in Settings > Hotkeys)
+OVERLAYS (Overlays tab)
+  Webcam position/size/opacity/shape, text and image overlays, watermark.
+  "Open layout editor" lets you drag everything on a picture of the frame.
+
+LIBRARY
+  All recordings with thumbnail, duration, resolution, frame rate, size and
+  date. Search, sort, Play, Open with, Show in folder, Rename, Details (the
+  file's real properties) and Delete (to the Recycle Bin). Import adds existing
+  videos; you can also drag video files onto the window.
+
+HOTKEYS (Settings > Hotkeys)
   Ctrl+Alt+R start/stop   Ctrl+Alt+S stop   Ctrl+Alt+P pause/resume
   Ctrl+Alt+M mute mic     Ctrl+Alt+X screenshot
+  They work while other programs have focus and must use Ctrl/Alt/Win (or an
+  F-key) so they never interfere with typing.
+
+SCREENSHOTS
+  Screenshot (Ctrl+Alt+X) saves a PNG of the selected display, window or region
+  to the screenshots folder (Settings > Output). LumaCapture's windows are not
+  included.
 
 IF SOMETHING GOES WRONG
-  - Errors appear in a banner in the recording panel, with the next step to
-    take.
-  - A crash or an interrupted recording: the recording is written
-    crash-safely (at most about the last second is lost). At the next start,
-    LumaCapture offers to recover it as "...-recovered.mkv". The original file
-    is kept.
-  - Logs: LumaCapture-data\logs. Crash and hang dumps:
-    LumaCapture-data\crashdumps. Nothing is ever uploaded.
+  - Errors appear in a banner at the top with what to do next.
+  - After a crash or power loss LumaCapture offers to recover the recording
+    ("...-recovered.mkv"); at most about one second is lost.
+  - Logs and crash reports: Settings > Advanced. Nothing is ever uploaded.
+  - Feedback: Help / About (Instagram @etcofficials, etcofficials28@gmail.com,
+    or a GitHub issue).
 
 KNOWN LIMITATIONS
+  - Video is encoded on the CPU; 1080p at 60 FPS is experimental on older CPUs.
   - Window capture on Windows 10 shows a yellow border drawn by Windows.
-  - A minimised window keeps showing its last image. A closed window stays on
-    its last image until you stop (choose it again afterwards).
   - Region capture must lie inside one monitor.
   - No echo cancellation: use headphones with a microphone.
-  - Background blur/removal only works with a green screen (chroma key); there
-    is no AI segmentation.
-  - Screenshots capture the source only (no webcam or overlays burned in).
-  - MP4 output is created by converting the finished MKV (MKV is safer).
-
-MANUAL TEST CHECKLIST
-  Recording (screen)
-    [ ] Display source, 1080p30: record 30 s with a moving window, then stop.
-        The file plays in a media player and lasts about 30 s.
-    [ ] Pause for about 5 s in the middle, resume, then stop. The video skips
-        the pause and the audio stays in sync (clap or speak on camera around
-        the pause).
-    [ ] Press Start twice quickly, and Stop twice quickly: nothing breaks, and
-        exactly one recording is saved.
-    [ ] Window source: choose a window, record, move/resize it, minimise and
-        restore it. The recording follows the window.
-    [ ] Region source: "Select region...", drag, Enter; edit X/Y/W/H; record.
-    [ ] MP4 container (Settings > General): after stopping, an .mp4 appears
-        (and the .mkv too if "Keep the MKV" is ticked).
-  Audio
-    [ ] Play music with "System audio" on and record 20 s: the music is in the
-        file.
-    [ ] Microphone: the meter moves when you speak. Mute (Ctrl+Alt+M) silences
-        only the mic.
-    [ ] Settings > Audio "separate tracks": the MKV has 3 audio tracks.
-  Webcam
-    [ ] Turn the webcam on and off several times in the main window: the
-        window never freezes.
-    [ ] Open "Image & camera...", press Auto adjust, compare with Before /
-        after, try each preset, then Reset.
-    [ ] Camera & lighting: switch Anti-flicker between 50 and 60 Hz under room
-        lights, and try both Low light options.
-    [ ] Layout & overlays: drag/resize the webcam and try circle, rounded,
-        border, mirror and crop. Record and check that it matches the preview.
-    [ ] Unplug the camera while recording: the screen recording continues.
-        Plug it back in: the camera recovers within a few seconds.
-  Recovery and errors
-    [ ] Start a recording and end LumaCapture with Task Manager. Restart it:
-        it offers to recover, and the "-recovered.mkv" plays.
-    [ ] History: Delete... asks for confirmation and moves the file to the
-        Recycle Bin.
+  - Background removal only with a green screen (no AI segmentation).

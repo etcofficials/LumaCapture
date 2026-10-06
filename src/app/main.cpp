@@ -15,13 +15,11 @@
 #include <QDate>
 
 #include <windows.h>
-#include <shobjidl.h>
 
 int main(int argc, char* argv[])
 {
-    // Taskbar grouping and the pinned/Start Menu icon use this ID (the installer's shortcut sets the same).
-    SetCurrentProcessExplicitAppUserModelID(L"etcofficials.LumaCapture");
-
+    // No explicit AppUserModelID: Windows derives it from the exe path, so a pinned
+    // taskbar icon, the Start Menu shortcut and the running window stay one entry.
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("LumaCapture"));
     QApplication::setOrganizationName(QStringLiteral("LumaCapture"));

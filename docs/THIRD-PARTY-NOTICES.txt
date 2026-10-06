@@ -5,7 +5,7 @@ LumaCapture itself is distributed under the GNU General Public License,
 version 3 (GPL-3.0), because it is linked with a GPL-3.0 build of FFmpeg that
 contains libx264. See GPL-3.0.txt (the LICENSE file in the source repository).
 LumaCapture source code: see the project repository / the source archive this
-build was made from (version 1.0.0, git tag v1.0.0).
+build was made from (version 2.0.0, git tag v2.0.0).
 
 FFmpeg 7.1.5 (BtbN "win64-gpl-shared-7.1" build, n7.1.5-12-g1fdbca85aa)
   Files: avcodec-61.dll, avformat-61.dll, avutil-59.dll, avfilter-10.dll,
